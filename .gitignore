@@ -1,0 +1,23 @@
+# Working copies of open documents, and the snapshots taken before
+# destructive operations. These are per-machine scratch, not source.
+data/
+
+# Awkward files built by tests/make_awkward.py for manual checks.
+tests/awkward/
+
+# Generated test material and scratch output.
+tests/_*
+tests/roundtrip.pdf
+tests/sample.pdf
+tests/sample_rev2.pdf
+tests/scanned.pdf
+tests/large.pdf
+tests/rendered_external.png
+tests/screenshot_app.png
+
+__pycache__/
+*.pyc
+.playwright-mcp/
+
+# NOTE: frontend/vendor/pdfjs/ is deliberately NOT ignored. The app renders
+# every page with it and works offline, so the viewer ships with the source.

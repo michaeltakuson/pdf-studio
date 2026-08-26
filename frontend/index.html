@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDF Studio</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body data-theme="dark">
+
+<header class="topbar">
+  <div class="brand">PDF&nbsp;Studio</div>
+  <div class="file-actions">
+    <button id="btnOpen" class="btn" title="開く (Ctrl+O)">開く</button>
+    <input type="file" id="fileInput" accept="application/pdf" hidden>
+    <button id="btnSave" class="btn" title="保存 (Ctrl+S)">保存</button>
+    <button id="btnDownload" class="btn" title="注釈込みのPDFを書き出す">PDF書き出し</button>
+    <button id="btnMore" class="btn" title="注釈の書き出し・取り込み・フラット化">注釈 ▾</button>
+    <button id="btnDoc" class="btn" title="ページ操作・墨消し・OCR・透かし・保護">文書 ▾</button>
+    <input type="file" id="xfdfInput" accept=".xfdf,.xml" hidden>
+    <input type="file" id="mergeInput" accept="application/pdf" hidden>
+    <input type="file" id="fdfInput" accept=".fdf,.json" hidden>
+    <input type="file" id="collateInput" accept="application/pdf" multiple hidden>
+    <input type="file" id="compareInput" accept="application/pdf" hidden>
+  </div>
+  <div class="doc-name" id="docName">文書が開かれていません</div>
+  <div class="spacer"></div>
+  <div class="search-group">
+    <input type="search" id="searchInput" class="input" placeholder="検索 (Ctrl+F)">
+    <button id="btnSearchPrev" class="btn icon" title="前へ">▲</button>
+    <button id="btnSearchNext" class="btn icon" title="次へ">▼</button>
+    <button id="btnSearchMarkup" class="btn" title="ヒットした語すべてに現在のマークアップを適用">一括適用</button>
+    <span id="searchCount" class="muted"></span>
+  </div>
+  <div class="history">
+    <button id="btnUndo" class="btn icon" title="元に戻す (Ctrl+Z)" disabled>↶</button>
+    <button id="btnRedo" class="btn icon" title="やり直し (Ctrl+Y)" disabled>↷</button>
+  </div>
+  <button id="btnTheme" class="btn icon" title="表示テーマの切り替え">◐</button>
+</header>
+
+<nav class="toolbar" id="toolbar">
+  <div class="tool-group">
+    <button class="tool" data-tool="select" title="選択 (V)"><span class="ti">▶</span><span class="tl">選択</span></button>
+    <button class="tool" data-tool="pan" title="手のひら (Space)"><span class="ti">✋</span><span class="tl">移動</span></button>
+  </div>
+  <div class="tool-group">
+    <button class="tool" data-tool="highlight" title="ハイライト (H)"><span class="ti">▮</span><span class="tl">ハイライト</span></button>
+    <button class="tool" data-tool="underline" title="下線 (U)"><span class="ti">U̲</span><span class="tl">下線</span></button>
+    <button class="tool" data-tool="squiggly" title="波線"><span class="ti">〜</span><span class="tl">波線</span></button>
+    <button class="tool" data-tool="strikeout" title="取り消し線 (K)"><span class="ti">S̶</span><span class="tl">取消線</span></button>
+    <button class="tool" data-tool="areaHighlight" title="エリアハイライト"><span class="ti">▤</span><span class="tl">範囲塗り</span></button>
+  </div>
+  <div class="tool-group">
+    <button class="tool" data-tool="freetext" title="テキスト (T)"><span class="ti">T</span><span class="tl">テキスト</span></button>
+    <button class="tool" data-tool="callout" title="引き出し線"><span class="ti">⤴</span><span class="tl">引き出し</span></button>
+    <button class="tool" data-tool="note" title="付箋 (N)"><span class="ti">🗨</span><span class="tl">付箋</span></button>
+  </div>
+  <div class="tool-group">
+    <button class="tool" data-tool="pen" title="ペン (P)"><span class="ti">✎</span><span class="tl">ペン</span></button>
+    <button class="tool" data-tool="marker" title="蛍光ペン"><span class="ti">🖊</span><span class="tl">蛍光ペン</span></button>
+    <button class="tool" data-tool="eraser" title="消しゴム (E)"><span class="ti">⌫</span><span class="tl">消しゴム</span></button>
+    <button class="tool" data-tool="lasso" title="投げ縄選択 (L)"><span class="ti">◌</span><span class="tl">投げ縄</span></button>
+  </div>
+  <div class="tool-group">
+    <button class="tool" data-tool="line" title="線・矢印 (I)"><span class="ti">╱</span><span class="tl">線</span></button>
+    <button class="tool" data-tool="square" title="長方形 (R)"><span class="ti">▭</span><span class="tl">矩形</span></button>
+    <button class="tool" data-tool="circle" title="円 (C)"><span class="ti">◯</span><span class="tl">円</span></button>
+    <button class="tool" data-tool="polygon" title="多角形"><span class="ti">⬠</span><span class="tl">多角形</span></button>
+    <button class="tool" data-tool="polyline" title="折れ線"><span class="ti">⟋⟍</span><span class="tl">折れ線</span></button>
+  </div>
+  <div class="tool-group">
+    <button class="tool" data-tool="stamp" title="スタンプ"><span class="ti">◈</span><span class="tl">スタンプ</span></button>
+    <button class="tool" data-tool="redact" title="墨消し"><span class="ti">█</span><span class="tl">墨消し</span></button>
+  </div>
+  <div class="tool-group">
+    <button class="tool" data-tool="measureDistance" title="距離を測る"><span class="ti">↔</span><span class="tl">距離</span></button>
+    <button class="tool" data-tool="measureArea" title="面積を測る"><span class="ti">▱</span><span class="tl">面積</span></button>
+    <button class="tool" data-tool="measureAngle" title="角度を測る"><span class="ti">∠</span><span class="tl">角度</span></button>
+    <button class="tool" data-tool="count" title="カウント（数量拾い）"><span class="ti">①</span><span class="tl">カウント</span></button>
+  </div>
+</nav>
+
+<div class="contextbar" id="contextbar"></div>
+
+<main class="workspace">
+  <aside class="side left" id="leftPanel">
+    <div class="side-tabs">
+      <button class="side-tab active" data-panel="thumbs">ページ</button>
+      <button class="side-tab" data-panel="outline">しおり</button>
+    </div>
+    <div class="side-body">
+      <div class="panel active" id="panelThumbs"></div>
+      <div class="panel" id="panelOutline"></div>
+    </div>
+  </aside>
+
+  <section class="stage" id="stage">
+    <div class="pages" id="pages"></div>
+    <div class="empty-state" id="emptyState">
+      <div class="empty-card">
+        <h1>PDF Studio</h1>
+        <p>PDFを開くか、ここにドラッグ＆ドロップしてください。</p>
+        <button id="btnOpen2" class="btn primary">PDFを開く</button>
+        <ul class="hints">
+          <li><b>V</b> 選択　<b>H</b> ハイライト　<b>T</b> テキスト　<b>P</b> ペン　<b>R</b> 矩形</li>
+          <li>直前に使った色・太さが次回の既定になります</li>
+          <li>注釈は規格準拠のPDF注釈として保存され、他のビューアでも見えます</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <aside class="side right" id="rightPanel">
+    <div class="side-tabs">
+      <button class="side-tab active" data-panel="props">プロパティ</button>
+      <button class="side-tab" data-panel="comments">コメント</button>
+      <button class="side-tab" data-panel="takeoff">数量</button>
+      <button class="side-tab" data-panel="settings">設定</button>
+    </div>
+    <div class="side-body">
+      <div class="panel active" id="panelProps"></div>
+      <div class="panel" id="panelComments"></div>
+      <div class="panel" id="panelTakeoff"></div>
+      <div class="panel" id="panelSettings"></div>
+    </div>
+  </aside>
+</main>
+
+<footer class="statusbar">
+  <span id="statusLeft">準備完了</span>
+  <span class="spacer"></span>
+  <span id="statusPage"></span>
+  <div class="zoom">
+    <button class="btn icon" data-zoom="out" title="縮小">−</button>
+    <select id="zoomSelect" class="select">
+      <option value="fit-width" selected>幅に合わせる</option>
+      <option value="fit-page">全体表示</option>
+      <option value="0.5">50%</option>
+      <option value="0.75">75%</option>
+      <option value="1">100%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+      <option value="4">400%</option>
+    </select>
+    <button class="btn icon" data-zoom="in" title="拡大">＋</button>
+  </div>
+  <span id="statusSave" class="muted"></span>
+</footer>
+
+<div id="toast" class="toast"></div>
+
+<div id="busy" class="busy" hidden>
+  <div class="busy-card">
+    <div class="spinner"></div>
+    <div class="busy-text" id="busyText">処理中…</div>
+    <div class="busy-note">この間の操作はできません。処理が終わると自動で戻ります。</div>
+  </div>
+</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
