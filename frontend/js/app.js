@@ -42,11 +42,27 @@ function status(message) {
 
 // ---------------------------------------------------------------- opening
 
-async function openFile(file) {
+async function openFile(file, password = '') {
   status('読み込み中…');
   const form = new FormData();
   form.append('file', file);
+  if (password) form.append('password', password);
   const response = await fetch('/api/open', { method: 'POST', body: form });
+
+  if (response.status === 401) {
+    // Encrypted, and the password we sent (if any) did not open it.
+    const { detail } = await response.json();
+    status('準備完了');
+    const values = await formDialog({
+      title: 'パスワードが必要です',
+      intro: `${file.name} は保護されています。開くためのパスワードを入力してください。`,
+      warning: password ? detail : undefined,
+      fields: [{ key: 'password', label: 'パスワード', type: 'password' }],
+      confirmLabel: '開く',
+    });
+    if (values?.password) await openFile(file, values.password);
+    return;
+  }
   if (!response.ok) {
     toast(`開けませんでした: ${(await response.json()).detail || response.status}`, 'error');
     status('準備完了');
@@ -64,7 +80,11 @@ async function openFile(file) {
   renderOutline($('#panelOutline'), state.toc, (page) => viewer.scrollToPage(page));
   renderThumbs($('#panelThumbs'), viewer, viewer.currentPage, (page) => viewer.scrollToPage(page));
   refreshAll();
-  toast(`${data.name} を開きました`);
+  // Opening decrypts into the working copy, so say so rather than let the
+  // reader assume the protection travelled with it.
+  toast(data.wasProtected
+    ? `${data.name} を開きました（保護は外れた状態で編集します。書き出すときは「パスワードで保護して書き出す」を使ってください）`
+    : `${data.name} を開きました`);
 }
 
 $('#fileInput').addEventListener('change', (e) => {

@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pymupdf
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -47,13 +47,19 @@ def _describe(entry: session.Doc) -> dict:
 
 
 @app.post("/api/open")
-async def open_document(file: UploadFile = File(...)):
+async def open_document(file: UploadFile = File(...), password: str = Form("")):
     data = await file.read()
     try:
-        entry = session.create(file.filename or "untitled.pdf", data)
+        entry = session.create(file.filename or "untitled.pdf", data, password)
+    except session.PasswordRequired as exc:
+        # 401 rather than 400: the request was fine, the credential was not.
+        # The browser uses this to ask for a password and try again.
+        raise HTTPException(401, str(exc))
     except Exception as exc:
         raise HTTPException(400, f"PDFを開けませんでした: {exc}")
-    return _describe(entry)
+    payload = _describe(entry)
+    payload["wasProtected"] = entry.was_protected
+    return payload
 
 
 @app.post("/api/new")
