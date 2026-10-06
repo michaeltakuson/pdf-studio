@@ -23,6 +23,7 @@ const state = {
   searchHits: [],
   searchIndex: -1,
   saving: false,
+  fileHandle: null,   // File System Access handle of the opened/saved file, when the browser gives one
 };
 
 // ---------------------------------------------------------------- toast
@@ -42,7 +43,7 @@ function status(message) {
 
 // ---------------------------------------------------------------- opening
 
-async function openFile(file, password = '') {
+async function openFile(file, password = '', handle = null) {
   status('読み込み中…');
   const form = new FormData();
   form.append('file', file);
@@ -60,7 +61,7 @@ async function openFile(file, password = '') {
       fields: [{ key: 'password', label: 'パスワード', type: 'password' }],
       confirmLabel: '開く',
     });
-    if (values?.password) await openFile(file, values.password);
+    if (values?.password) await openFile(file, values.password, handle);
     return;
   }
   if (!response.ok) {
@@ -69,6 +70,7 @@ async function openFile(file, password = '') {
     return;
   }
   const data = await response.json();
+  state.fileHandle = handle;
   state.toc = data.toc || [];
   model.loadDocument(data);
   $('#docName').textContent = data.name;
@@ -91,17 +93,34 @@ $('#fileInput').addEventListener('change', (e) => {
   if (e.target.files[0]) openFile(e.target.files[0]);
   e.target.value = '';
 });
+/** Open through the file picker where possible, so Save can write back to the same file. */
+async function chooseFile() {
+  if (!window.showOpenFilePicker) { $('#fileInput').click(); return; }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+    });
+    await openFile(await handle.getFile(), '', handle);
+  } catch (err) {
+    if (err.name !== 'AbortError') $('#fileInput').click();
+  }
+}
 for (const id of ['#btnOpen', '#btnOpen2']) {
-  $(id).addEventListener('click', () => $('#fileInput').click());
+  $(id).addEventListener('click', chooseFile);
 }
 
 stage.addEventListener('dragover', (e) => { e.preventDefault(); stage.classList.add('dragover'); });
 stage.addEventListener('dragleave', () => stage.classList.remove('dragover'));
-stage.addEventListener('drop', (e) => {
+stage.addEventListener('drop', async (e) => {
   e.preventDefault();
   stage.classList.remove('dragover');
+  const item = e.dataTransfer.items?.[0];
+  // Must be requested synchronously, before the event finishes.
+  const handlePromise = item?.getAsFileSystemHandle ? item.getAsFileSystemHandle().catch(() => null) : null;
   const file = e.dataTransfer.files[0];
-  if (file && file.type === 'application/pdf') openFile(file);
+  if (!file || file.type !== 'application/pdf') return;
+  const handle = handlePromise ? await handlePromise : null;
+  openFile(file, '', handle && handle.kind === 'file' ? handle : null);
 });
 
 // ---------------------------------------------------------------- rendering
@@ -339,8 +358,8 @@ function scheduleAutosave() {
   autosaveTimer = setTimeout(() => save({ quiet: true }), delay);
 }
 
-async function save({ quiet = false } = {}) {
-  if (!model.store.docId || !model.store.dirty) return;
+async function save({ quiet = false, force = false } = {}) {
+  if (!model.store.docId || (!model.store.dirty && !force)) return;
   if (state.saving) {
     // A save is already in flight. Dropping this one would leave the newest
     // edits unsaved until something else happened to trigger another.
@@ -374,7 +393,65 @@ async function save({ quiet = false } = {}) {
   }
 }
 
-$('#btnSave').addEventListener('click', () => save());
+/**
+ * Save to a real file on disk.
+ *
+ * save() above only writes the annotations into the in-tab working copy (and
+ * runs on a timer). This is the explicit one: it flushes that, then writes the
+ * finished PDF to the opened file, or to a file the person picks. Browsers
+ * without the File System Access API fall back to a normal download.
+ */
+async function saveToDisk({ saveAs = false } = {}) {
+  if (!model.store.docId) return;
+  while (state.saving) await new Promise((resolve) => setTimeout(resolve, 50));
+  clearTimeout(autosaveTimer);
+  await save({ quiet: true, force: true });
+  if (model.store.dirty) return;  // save() already reported why it failed
+
+  $('#statusSave').textContent = '保存中…';
+  try {
+    const response = await fetch(`/api/doc/${model.store.docId}/download`);
+    if (!response.ok) throw new Error(await response.text());
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = /filename\*=UTF-8''([^;]+)/.exec(disposition);
+    const name = match ? decodeURIComponent(match[1]) : 'document.pdf';
+
+    let handle = saveAs ? null : state.fileHandle;
+    if (handle && handle.queryPermission && await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+      if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') handle = null;
+    }
+    if (!handle && window.showSaveFilePicker) {
+      handle = await window.showSaveFilePicker({
+        suggestedName: state.fileHandle?.name && !saveAs ? state.fileHandle.name : name,
+        types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+      });
+    }
+    if (handle) {
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      state.fileHandle = handle;
+      $('#docName').textContent = handle.name;
+      document.title = `${handle.name} — PDF Studio`;
+      toast(`${handle.name} に保存しました`);
+    } else {
+      downloadResponse(blob, response, name);  // no File System Access API: plain download
+    }
+    model.markClean();
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      status('準備完了');
+    } else {
+      toast(`保存に失敗しました: ${err.message}`, 'error');
+    }
+  } finally {
+    refreshPanels();
+  }
+}
+
+$('#btnSave').addEventListener('click', () => saveToDisk());
+$('#btnSaveAs').addEventListener('click', () => saveToDisk({ saveAs: true }));
 $('#btnDownload').addEventListener('click', async () => {
   if (!model.store.docId) return;
   await save({ quiet: true });
@@ -1384,8 +1461,8 @@ window.addEventListener('keydown', (e) => {
   const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
   const mod = e.ctrlKey || e.metaKey;
 
-  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
-  if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); $('#fileInput').click(); return; }
+  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveToDisk({ saveAs: e.shiftKey }); return; }
+  if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); chooseFile(); return; }
   if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); $('#searchInput').focus(); return; }
   if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); model.undo(); return; }
   if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {

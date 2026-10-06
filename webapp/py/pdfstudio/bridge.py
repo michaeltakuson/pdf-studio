@@ -714,9 +714,31 @@ _BINARY_ROUTES = {
 }
 
 
+try:  # only present inside Pyodide >= 0.28
+    from pyodide.ffi import jsnull as _JSNULL
+except ImportError:  # pragma: no cover - the server build / unit tests
+    _JSNULL = None
+
+
+def _unjs(value):
+    """Turn Pyodide's JsNull (what a JS `null` becomes under toPy) into None.
+
+    Without this, a null anywhere in an annotation (an unset colour, a missing
+    link target...) survives into the document and later fails with
+    "Object of type JsNull is not JSON serializable" when the save writes it out.
+    """
+    if _JSNULL is not None and value is _JSNULL:
+        return None
+    if isinstance(value, dict):
+        return {k: _unjs(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_unjs(v) for v in value]
+    return value
+
+
 def dispatch(action: str, payload) -> dict:
     """The one function the browser calls. `payload` is a toPy()-converted dict."""
-    payload = dict(payload) if payload is not None else {}
+    payload = _unjs(dict(payload)) if payload is not None else {}
     try:
         if action in _JSON_ROUTES:
             body = _JSON_ROUTES[action](payload)
