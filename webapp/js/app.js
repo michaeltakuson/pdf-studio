@@ -17,7 +17,7 @@ import { Ribbon } from './ribbon.js';
 import { iconSvg } from './icons.js';
 import { TextEditor, fitRect, ensureFontLoaded, canBold, LINE_HEIGHT } from './textedit.js';
 import { MARKUP_TOOLS, ONE_SHOT, translated } from './tools.js';
-import { signatureDialog, hankoDialog, normaliseImage, fileToDataUrl } from './stamps.js';
+import { signatureDialog, hankoDialog, cropDialog, normaliseImage, fileToDataUrl } from './stamps.js';
 import * as ops from './docops.js';
 import { keyFor, saveDraft, loadDraft, clearDraft, pruneDrafts } from './drafts.js';
 import { rememberFile, recentFiles, forgetFile, SNIPPET_FIELDS, loadSnippets, saveSnippets } from './recent.js';
@@ -1370,6 +1370,28 @@ async function insertImage(source, { at = null, points = null } = {}) {
   toast('画像を置きました。ドラッグで移動、角のハンドルで大きさを変えられます');
 }
 
+/** Keep only part of a picture that is already on the page. */
+async function cropImage(annot) {
+  if (!annot || annot.type !== 'image' || !annot.image) return;
+  if (annot.flags?.locked) { toast('ロックされているため切り抜けません', 'warn'); return; }
+  let result;
+  try {
+    result = await cropDialog(annot.image);
+  } catch {
+    toast('この画像は切り抜けませんでした', 'error');
+    return;
+  }
+  if (!result || !model.byId(annot.id)) return;
+  const [fx0, fy0, fx1, fy1] = result.box;
+  if (fx0 <= 0 && fy0 <= 0 && fx1 >= 1 && fy1 >= 1) return;   // the whole picture: nothing to do
+  // What is kept stays exactly where it was on the page.
+  const [x0, y0, x1, y1] = model.byId(annot.id).rect;
+  const rect = [x0 + (x1 - x0) * fx0, y0 + (y1 - y0) * fy0, x0 + (x1 - x0) * fx1, y0 + (y1 - y0) * fy1];
+  model.updateAnnots([annot.id], { image: result.image, rect });
+  refreshAll();
+  toast('画像を切り抜きました（Ctrl+Z で戻せます）');
+}
+
 async function insertSignature() {
   const result = await signatureDialog({ defaultName: getPref('author') || '' });
   if (!result) return;
@@ -1910,6 +1932,8 @@ stage.addEventListener('contextmenu', (e) => {
     openMenuAt(e.clientX, e.clientY, [
       single && (single.type === 'freetext' || single.type === 'note')
         ? { label: '文字を編集', icon: 'edittext', action: () => startTextEdit(single.id) } : null,
+      single && single.type === 'image' && single.image
+        ? { label: '画像を切り抜く…', icon: 'crop', disabled: locked, action: () => cropImage(single) } : null,
       { label: '切り取り', icon: 'cut', key: 'Ctrl+X', disabled: locked, action: cutSelection },
       { label: 'コピー', icon: 'copy', key: 'Ctrl+C', action: copySelection },
       { label: '複製', icon: 'duplicate', key: 'Ctrl+D', action: duplicateSelection },

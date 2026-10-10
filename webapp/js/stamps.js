@@ -98,6 +98,116 @@ export async function normaliseImage(source, { maxSide = 2400, whiteToAlpha = fa
   return { image: url, width, height };
 }
 
+// ---------------------------------------------------------------- cropping
+
+/**
+ * Ask which part of a picture to keep. Resolves to
+ * {image, width, height, box: [x0, y0, x1, y1]} — `box` in fractions of the
+ * original, so the caller can keep the kept part where it was — or null.
+ */
+export async function cropDialog(source) {
+  const picture = await loadImage(source);
+  const fullW = picture.naturalWidth || 1;
+  const fullH = picture.naturalHeight || 1;
+  // As large as the (wide) dialog allows, leaving room for its text and buttons.
+  const roomW = Math.min(620, window.innerWidth * 0.96 - 64);
+  const roomH = Math.max(120, Math.min(430, window.innerHeight * 0.92 - 250));
+  const scale = Math.min(1, roomW / fullW, roomH / fullH);
+  const shownW = Math.max(40, Math.round(fullW * scale));
+  const shownH = Math.max(40, Math.round(fullH * scale));
+  // Start a little inside the edges: it shows what the frame is for.
+  let box = [0.08, 0.08, 0.92, 0.92];
+
+  const frame = node('div', { class: 'crop-frame' });
+  for (const corner of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
+    const grip = node('i', { class: `crop-grip ${corner}` });
+    grip.dataset.grip = corner;
+    frame.append(grip);
+  }
+  const stage = node('div', { class: 'crop-stage', style: `width:${shownW}px;height:${shownH}px` }, [
+    node('img', { src: picture.src, alt: '', draggable: 'false', style: `width:${shownW}px;height:${shownH}px` }),
+    frame,
+  ]);
+  const size = node('div', { class: 'field-hint' });
+  const place = () => {
+    frame.style.left = `${box[0] * 100}%`;
+    frame.style.top = `${box[1] * 100}%`;
+    frame.style.width = `${(box[2] - box[0]) * 100}%`;
+    frame.style.height = `${(box[3] - box[1]) * 100}%`;
+    size.textContent = `残す範囲: ${Math.round((box[2] - box[0]) * fullW)} × ${Math.round((box[3] - box[1]) * fullH)} ピクセル（元は ${fullW} × ${fullH}）`;
+  };
+  place();
+
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const MIN = Math.max(0.02, 8 / Math.min(shownW, shownH));
+  let drag = null;
+  stage.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    const bounds = stage.getBoundingClientRect();
+    const fx = clamp01((event.clientX - bounds.left) / bounds.width);
+    const fy = clamp01((event.clientY - bounds.top) / bounds.height);
+    const grip = event.target.dataset?.grip;
+    drag = grip ? { kind: grip, start: [...box] }
+      : event.target === frame ? { kind: 'move', start: [...box], fx, fy }
+        : { kind: 'new', fx, fy };
+    stage.setPointerCapture(event.pointerId);
+  });
+  stage.addEventListener('pointermove', (event) => {
+    if (!drag) return;
+    const bounds = stage.getBoundingClientRect();
+    const fx = clamp01((event.clientX - bounds.left) / bounds.width);
+    const fy = clamp01((event.clientY - bounds.top) / bounds.height);
+    if (drag.kind === 'new') {
+      // A fresh frame once the pointer has really moved; a mere click keeps the old one.
+      if (Math.abs(fx - drag.fx) < MIN && Math.abs(fy - drag.fy) < MIN) return;
+      box = [Math.min(fx, drag.fx), Math.min(fy, drag.fy), Math.max(fx, drag.fx), Math.max(fy, drag.fy)];
+    } else if (drag.kind === 'move') {
+      const [x0, y0, x1, y1] = drag.start;
+      const dx = Math.min(1 - x1, Math.max(-x0, fx - drag.fx));
+      const dy = Math.min(1 - y1, Math.max(-y0, fy - drag.fy));
+      box = [x0 + dx, y0 + dy, x1 + dx, y1 + dy];
+    } else {
+      const next = [...drag.start];
+      if (drag.kind.includes('w')) next[0] = Math.min(fx, next[2] - MIN);
+      if (drag.kind.includes('e')) next[2] = Math.max(fx, next[0] + MIN);
+      if (drag.kind.includes('n')) next[1] = Math.min(fy, next[3] - MIN);
+      if (drag.kind.includes('s')) next[3] = Math.max(fy, next[1] + MIN);
+      box = next;
+    }
+    place();
+  });
+  const release = () => { drag = null; };
+  stage.addEventListener('pointerup', release);
+  stage.addEventListener('pointercancel', release);
+
+  const whole = node('button', { class: 'btn', text: '全体に戻す', onclick: () => { box = [0, 0, 1, 1]; place(); } });
+  const body = node('div', { class: 'crop-body' }, [stage, node('div', { class: 'crop-tools' }, [size, whole])]);
+
+  return customDialog({
+    title: '画像を切り抜く',
+    intro: '残したい範囲を枠で囲んでください。枠の角や辺で大きさを、枠の中をドラッグで位置を変えられます。',
+    wide: true,
+    build: () => body,
+    confirmLabel: '切り抜く',
+    onConfirm: () => {
+      const x = Math.round(box[0] * fullW);
+      const y = Math.round(box[1] * fullH);
+      const width = Math.max(1, Math.round((box[2] - box[0]) * fullW));
+      const height = Math.max(1, Math.round((box[3] - box[1]) * fullH));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d').drawImage(picture, x, y, width, height, 0, 0, width, height);
+      const photo = /^data:image\/jpe?g/i.test(String(source));
+      return {
+        image: photo ? canvas.toDataURL('image/jpeg', 0.92) : canvas.toDataURL('image/png'),
+        width, height,
+        box: [x / fullW, y / fullH, (x + width) / fullW, (y + height) / fullH],
+      };
+    },
+  });
+}
+
 // ---------------------------------------------------------------- signature
 
 /** Ask for a signature. Resolves to {image, width, height} or null. */
