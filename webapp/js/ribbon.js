@@ -166,9 +166,17 @@ export class Ribbon {
 
   _fill(custom, key) {
     custom.key = key;
+    // Rebuilding must not take the keyboard away from someone working the
+    // controls with it (arrow keys in a drop-down): give the focus back to
+    // the control in the same place.
+    const FOCUSABLE = 'select, button, input, textarea';
+    const active = document.activeElement;
+    const at = active && custom.holder.contains(active)
+      ? [...custom.holder.querySelectorAll(FOCUSABLE)].indexOf(active) : -1;
     custom.holder.textContent = '';
     const content = custom.item.custom();
     if (content) custom.holder.append(content);
+    if (at >= 0) custom.holder.querySelectorAll(FOCUSABLE)[at]?.focus({ preventScroll: true });
     custom.holder.dataset.empty = content ? '0' : '1';
     const group = custom.holder.closest('.rgroup');
     if (group) {

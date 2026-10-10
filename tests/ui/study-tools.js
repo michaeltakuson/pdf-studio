@@ -37,6 +37,7 @@ async (page) => {
     await page.waitForTimeout(500);
     await page.locator('#selectionBar button').first().click();
     await page.waitForTimeout(300);
+    await tab('表示');   // the study sheet lives on the view tab
     await page.getByTitle(/^暗記シート/).first().click();
     await page.waitForTimeout(400);
     out.studyToast = await toastText();
@@ -47,6 +48,7 @@ async (page) => {
     await page.waitForTimeout(300);
     out.coveredAfterClick = await page.locator('.annot.covered').count();
     await page.getByTitle(/^暗記シート/).first().click();
+    await tab('ホーム');
   });
 
   await step('snapshot', async () => {

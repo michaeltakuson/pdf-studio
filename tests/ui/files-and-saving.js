@@ -92,12 +92,6 @@ async (page) => {
     out.recent = await page.evaluate(async () => { const r = await import('/js/recent.js'); return (await r.recentFiles()).map((x) => x.name); });
   });
 
-  await step('print', async () => {
-    await page.keyboard.press('Control+p');
-    await idle(); await page.waitForTimeout(1500);
-    out.printFrame = await page.evaluate(() => { const f = [...document.querySelectorAll('iframe')].pop(); return f ? f.src.slice(0, 5) : null; });
-  });
-
   await step('annotation export', async () => {
     for (const label of ['Excel用のCSVにする', 'XFDFにする（書き込みだけを渡す）', 'Markdownにする（ノートアプリ用）']) {
       await page.locator('#ribbonTabs .tab', { hasText: '校閲' }).click();
@@ -113,6 +107,14 @@ async (page) => {
     await page.setInputFiles('#xfdfInput', S + 'out.xfdf');
     await page.waitForTimeout(1500);
     out.xfdfImport = [before, await model('(m) => m.store.annots.length'), await toastText()];
+  });
+
+  // Printing comes last: the browser's own print window, once it opens,
+  // takes every click until it is closed, and nothing after it would run.
+  await step('print', async () => {
+    await page.keyboard.press('Control+p');
+    await idle(); await page.waitForTimeout(1500);
+    out.printFrame = await page.evaluate(() => { const f = [...document.querySelectorAll('iframe')].pop(); return f ? f.src.slice(0, 5) : null; });
   });
 
   out.errors = errs;
