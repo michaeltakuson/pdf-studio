@@ -127,9 +127,10 @@ export function addAnnots(items, { select = true } = {}) {
   const created = items.map((item) => normalise({ ...item, id: item.id || uid() }));
   const previous = store.selection;
   run({
+    created,
     redo() {
-      store.annots.push(...created);
-      if (select) store.selection = created.map((a) => a.id);
+      store.annots.push(...this.created);
+      if (select) store.selection = this.created.map((a) => a.id);
     },
     undo() {
       const ids = new Set(created.map((a) => a.id));
@@ -138,6 +139,48 @@ export function addAnnots(items, { select = true } = {}) {
     },
   }, 'add');
   return created;
+}
+
+/** Where in the undo history `id` was made, if nothing but it has changed since. */
+function creationOf(id) {
+  for (let index = undoStack.length - 1; index >= 0; index--) {
+    const command = undoStack[index];
+    if (command.created?.some((a) => a.id === id)) return index;
+    // Anything else in between has to be a change to this one alone.
+    if (!command.before || [...command.before.keys()].some((key) => key !== id)) return -1;
+  }
+  return -1;
+}
+
+/**
+ * Make "created it, styled it, typed into it" a single undo step.
+ *
+ * A text box is added empty and gets its words when the editor closes. Left
+ * as separate steps, one Ctrl+Z would take the words away and leave an empty,
+ * invisible box behind. Returns false when the history does not allow it.
+ */
+export function absorbIntoCreation(id) {
+  const index = creationOf(id);
+  const current = byId(id);
+  if (index < 0 || !current) return false;
+  const add = undoStack[index];
+  add.created[add.created.findIndex((a) => a.id === id)] = current;
+  undoStack.length = index + 1;
+  return true;
+}
+
+/**
+ * Take back something that was only just made and never filled in (a text
+ * box closed while still empty), leaving no trace in the undo history.
+ */
+export function cancelCreation(id) {
+  const index = creationOf(id);
+  if (index < 0 || undoStack[index].created.length !== 1) return false;
+  undoStack.length = index;
+  store.annots = store.annots.filter((a) => a.id !== id);
+  store.selection = store.selection.filter((other) => other !== id);
+  emit('remove');
+  return true;
 }
 
 /** Swap the whole set of annotations (restoring a recovered draft); undoable. */

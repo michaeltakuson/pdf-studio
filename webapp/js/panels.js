@@ -600,7 +600,8 @@ export function renderTakeoff(container, {
 
 export const SHORTCUTS = {
   'Ctrl+O': '開く', 'Ctrl+S': '上書き保存', 'Ctrl+Shift+S': '名前を付けて保存', 'Ctrl+P': '印刷',
-  'Ctrl+F': '検索', 'Ctrl+F1': 'リボンを折りたたむ／戻す', 'Ctrl+Z': '元に戻す', 'Ctrl+Y': 'やり直し',
+  'Ctrl+F': '検索', 'Ctrl+F1': 'リボンを折りたたむ／戻す',
+  'Ctrl+B': 'テキストを太字に', 'Ctrl+] / Ctrl+[': 'テキストの文字を大きく／小さく', 'Ctrl+Z': '元に戻す', 'Ctrl+Y': 'やり直し',
   'Ctrl+C / X / V': '書き込みのコピー・切り取り・貼り付け', 'Ctrl+D': '複製',
   'Ctrl+A': 'このページの書き込みを全選択', 'Delete': '選択した書き込みを削除',
   '矢印キー': '選択した書き込みを少し動かす（Shift で大きく）',

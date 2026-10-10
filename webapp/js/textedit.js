@@ -236,7 +236,7 @@ export class TextEditor {
       // in the middle of a sentence; otherwise the browser would take them
       // (Ctrl+S offering to save the web page, for one).
       if (!converting && (event.ctrlKey || event.metaKey) && !event.altKey
-        && (['s', 'p', 'o', 'f'].includes(event.key.toLowerCase()) || event.key === 'F1')) return;
+        && (['s', 'p', 'o', 'f', 'b', ']', '[', '>', '<'].includes(event.key.toLowerCase()) || event.key === 'F1')) return;
       event.stopPropagation();
     });
     for (const type of ['keyup', 'keypress', 'copy', 'cut']) {

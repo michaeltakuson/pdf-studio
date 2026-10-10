@@ -15,7 +15,7 @@ import {
 } from './dialogs.js';
 import { Ribbon } from './ribbon.js';
 import { iconSvg } from './icons.js';
-import { TextEditor, fitRect, ensureFontLoaded, LINE_HEIGHT } from './textedit.js';
+import { TextEditor, fitRect, ensureFontLoaded, canBold, LINE_HEIGHT } from './textedit.js';
 import { MARKUP_TOOLS, ONE_SHOT, translated } from './tools.js';
 import { signatureDialog, hankoDialog, normaliseImage, fileToDataUrl } from './stamps.js';
 import * as ops from './docops.js';
@@ -749,8 +749,8 @@ function commitText(id, isNew, text, size, { keepSelected = false } = {}) {
   if (!annot) { refreshAll(); return; }
   if (!text) {
     // An empty text box is nothing: drop it rather than leave an invisible
-    // object on the page.
-    model.removeAnnots([id]);
+    // object on the page. One that was never filled in was never there.
+    if (!(isNew && model.cancelCreation(id))) model.removeAnnots([id]);
     refreshAll();
     return;
   }
@@ -763,6 +763,7 @@ function commitText(id, isNew, text, size, { keepSelected = false } = {}) {
   const patch = { text, contents: text, rect };
   const same = text === annot.text && rect.every((v, i) => Math.abs(v - annot.rect[i]) < 0.02);
   if (!same) model.updateAnnots([id], patch);
+  if (isNew) model.absorbIntoCreation(id);
   if (!keepSelected && model.store.selection.includes(id)) model.select([]);
   refreshAll();
 }
@@ -849,8 +850,9 @@ function closeNoteEditor() {
   box.remove();
   const annot = model.byId(id);
   if (!annot) return;
-  if (isNew && !value) { model.removeAnnots([id]); return; }
+  if (isNew && !value) { if (!model.cancelCreation(id)) model.removeAnnots([id]); return; }
   if (value !== (annot.contents || '')) model.updateAnnots([id], { contents: value });
+  if (isNew) model.absorbIntoCreation(id);
 }
 
 // ================================================================ tool events
@@ -1031,6 +1033,29 @@ function applyStylePatch(patch, gesture) {
   }
   state.editor?.focus();
   ribbon.refresh();
+}
+
+/**
+ * Ctrl+B and the size keys of a word processor (Ctrl+] / Ctrl+[, or
+ * Ctrl+Shift+> / <), for the text box being typed in or the ones selected.
+ */
+function formatShortcut(event) {
+  const key = event.key.toLowerCase();
+  const grow = key === ']' || key === '>' ? 1 : key === '[' || key === '<' ? -1 : 0;
+  if (key !== 'b' && !grow) return false;
+  const texts = selectedAnnots().filter((a) => a.type === 'freetext' && !a.flags?.locked);
+  if (!texts.length) return false;
+  const base = styleFor('freetext').font || {};
+  const font = { ...base, ...(texts[0].style?.font || {}) };
+  if (key === 'b') {
+    if (canBold(font)) applyStylePatch({ font: { bold: !font.bold } });
+    else toast('このフォントには太字がありません', 'warn');
+  } else {
+    const size = Math.min(144, Math.max(4, Math.round(Number(font.size) || 12) + grow));
+    applyStylePatch({ font: { size } }, 'size-key');
+    endMergeWhenIdle(700);
+  }
+  return true;
 }
 
 function toolKeyOf(annot) {
@@ -2786,6 +2811,7 @@ window.addEventListener('keydown', (e) => {
   if (mod && key === 'p') { e.preventDefault(); printDocument(); return; }
   if (mod && key === 'f') { e.preventDefault(); $('#searchInput').focus(); $('#searchInput').select(); return; }
   if (mod && e.key === 'F1') { e.preventDefault(); toggleRibbon(); return; }
+  if (mod && !e.altKey && (!typing || target.closest?.('.ft-editor')) && !isComposing(e) && formatShortcut(e)) { e.preventDefault(); return; }
   if (typing || isComposing(e)) return;
 
   if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
