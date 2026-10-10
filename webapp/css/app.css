@@ -205,8 +205,8 @@ body[data-theme="dark"] .tab.file { color: #10203a; }
 .rbtn.locked { box-shadow: inset 0 0 0 2px var(--accent); }
 .tab-fold {
   appearance: none; border: none; background: transparent; color: var(--text-dim);
-  font: inherit; font-size: 12px; cursor: pointer; margin-left: auto; align-self: center;
-  padding: 3px 9px; border-radius: 5px; flex: none;
+  cursor: pointer; margin-left: auto; align-self: center; display: flex;
+  padding: 4px 8px; border-radius: 5px; flex: none;
 }
 .tab-fold:hover { background: var(--surface-3); color: var(--text); }
 .tabs.folded .tab.active { background: transparent; border-color: transparent; }

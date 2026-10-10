@@ -76,7 +76,7 @@ export class Ribbon {
     this._peek(false);
     this.bodyEl.classList.toggle('collapsed', this.collapsed);
     this.tabsEl.classList.toggle('folded', this.collapsed);
-    this.foldEl.textContent = this.collapsed ? '▾' : '▴';
+    this.foldEl.innerHTML = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${this.collapsed ? 'M3.5 6l4.5 4.5L12.500 6' : 'M3.5 10.500L8 6l4.500 4.500'}"/></svg>`;
     this.foldEl.title = this.collapsed ? 'リボンを常に表示（Ctrl+F1）' : 'リボンを折りたたんで紙面を広く（Ctrl+F1）';
     this.foldEl.setAttribute('aria-label', this.foldEl.title);
     if (!this.collapsed) this._hint();
