@@ -17,7 +17,9 @@ import { compute, MEASURE_KINDS } from './measure.js';
 import { LINE_HEIGHT } from './textedit.js';
 
 export const MARKUP_TOOLS = new Set(['highlight', 'underline', 'squiggly', 'strikeout']);
-const DRAG_SHAPES = new Set(['square', 'circle', 'line', 'arrow', 'areaHighlight', 'redact', 'stamp']);
+const DRAG_SHAPES = new Set(['square', 'circle', 'line', 'arrow', 'areaHighlight', 'redact', 'stamp', 'whiteout', 'snapshot', 'crop']);
+// Tools that only mark out a region for something else to act on.
+const REGION_TOOLS = new Set(['snapshot', 'crop']);
 const TEXT_TOOLS = new Set(['freetext', 'callout']);
 const POLY_TOOLS = new Set(['polygon', 'polyline']);
 const INK_TOOLS = new Set(['pen', 'marker']);
@@ -126,7 +128,7 @@ export class ToolController extends EventTarget {
 
   _onDown(event) {
     if (event.button !== 0 && event.pointerType === 'mouse') return;
-    if (event.target.closest?.('.ft-host, .note-editor')) return;
+    if (event.target.closest?.('.ft-host, .note-editor, .form-layer')) return;
     this._activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
     if (event.pointerType === 'pen') this.sawPen = true;
 
@@ -551,7 +553,7 @@ export class ToolController extends EventTarget {
     if (!p.node) {
       const tag = tool === 'circle' ? 'ellipse' : isLine || tool === 'callout' ? 'line' : 'rect';
       const filled = tool === 'areaHighlight' || tool === 'redact';
-      const text = tool === 'freetext';
+      const text = tool === 'freetext' || REGION_TOOLS.has(tool) || tool === 'whiteout';
       p.node = el(tag, {
         class: 'preview',
         fill: filled ? (p.style.fill || p.style.stroke) : text ? 'none' : (p.style.fill || 'none'),
@@ -656,7 +658,15 @@ export class ToolController extends EventTarget {
 
     if (!dragged) {
       // A bare click with a shape tool: say what to do rather than nothing.
-      this._emit('hint', { message: 'ドラッグして描いてください' });
+      this._emit('hint', { message: 'ドラッグして範囲を指定してください' });
+      return;
+    }
+    if (REGION_TOOLS.has(tool)) {
+      this._emit('region', { tool, view: pending.view, rect });
+      return;
+    }
+    if (tool === 'whiteout') {
+      this._emit('whiteout', { view: pending.view, rect, base });
       return;
     }
 

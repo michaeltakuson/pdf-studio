@@ -158,12 +158,15 @@ export const STANDARD_STAMPS = [
   'NOT FOR PUBLIC RELEASE', 'SOLD', 'TOP SECRET', 'DRAFT',
 ];
 
-export function renderAnnot(annot, { editingId = null } = {}) {
+export function renderAnnot(annot, { editingId = null, mask = null } = {}) {
   const style = annot.style || {};
+  // Study mode: every marker becomes a solid strip hiding the words under
+  // it, like a red sheet over a textbook, until it is clicked.
+  const covered = !!mask && (annot.type === 'highlight' || annot.type === 'areaHighlight') && !mask.has(annot.id);
   const group = el('g', {
     'data-id': annot.id,
     'data-type': annot.type,
-    class: `annot hit${annot.type === 'freetext' ? ' is-text' : ''}`,
+    class: `annot hit${annot.type === 'freetext' ? ' is-text' : ''}${covered ? ' covered' : ''}`,
     opacity: annot.flags?.hidden ? 0.15 : 1,
   });
 
@@ -182,8 +185,8 @@ export function renderAnnot(annot, { editingId = null } = {}) {
       for (const r of quadRects(annot)) {
         group.append(el('rect', {
           x: r.x, y: r.y, width: r.w, height: r.h,
-          fill: style.stroke, opacity: style.opacity ?? 0.45,
-          style: 'mix-blend-mode:multiply',
+          fill: style.stroke, opacity: covered ? 1 : (style.opacity ?? 0.45),
+          style: covered ? null : 'mix-blend-mode:multiply',
         }));
       }
       break;
@@ -192,8 +195,8 @@ export function renderAnnot(annot, { editingId = null } = {}) {
       group.append(el('rect', {
         x: annot.rect[0], y: annot.rect[1],
         width: annot.rect[2] - annot.rect[0], height: annot.rect[3] - annot.rect[1],
-        fill: style.fill || style.stroke, opacity: style.opacity ?? 0.35,
-        style: 'mix-blend-mode:multiply',
+        fill: style.fill || style.stroke, opacity: covered ? 1 : (style.opacity ?? 0.35),
+        style: covered ? null : 'mix-blend-mode:multiply',
       }));
       break;
 

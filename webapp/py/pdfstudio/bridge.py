@@ -631,6 +631,15 @@ def outline_set(payload: dict) -> dict:
     return {"toc": entry.doc.get_toc(simple=True)}
 
 
+def outline_auto(payload: dict) -> dict:
+    entry = _doc(payload)
+    toc = pages.auto_outline(entry.doc)
+    if not toc:
+        raise ApiError(400, "見出しになりそうな文字が見つかりませんでした（スキャンした文書は、先に文字認識をしてください）")
+    pages.set_outline(entry.doc, toc)
+    return {"toc": entry.doc.get_toc(simple=True)}
+
+
 def metadata_set(payload: dict) -> dict:
     entry = _doc(payload)
     metadata = dict(entry.doc.metadata or {})
@@ -824,6 +833,16 @@ def _text(payload: dict):
     return f"{_stem(entry)}.txt", "text/plain", ("\ufeff" + pages.to_text(entry.doc)).encode("utf-8")
 
 
+def _snapshot(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    index = int(payload.get("page", 0))
+    if index < 0 or index >= entry.doc.page_count:
+        raise ApiError(404, "ページがありません")
+    data = pages.snapshot(entry.doc[index], payload["rect"], int(payload.get("dpi", 200)))
+    return f"{_stem(entry)}_p{index + 1}_切り抜き.png", "image/png", data
+
+
 def _extract_ranges(payload: dict):
     entry = _doc(payload)
     _sync(entry, payload)
@@ -891,6 +910,7 @@ _JSON_ROUTES = {
     "from-images": from_images,
     "compress": compress_document,
     "outline.set": outline_set,
+    "outline.auto": outline_auto,
     "metadata.set": metadata_set,
     "ocr.apply": ocr_apply,
     "page.text": page_text,
@@ -907,6 +927,7 @@ _BINARY_ROUTES = {
     "file": _file_bytes,
     "download": _download,
     "nup": _nup,
+    "snapshot": _snapshot,
     "split": _split,
     "images": _images,
     "text": _text,

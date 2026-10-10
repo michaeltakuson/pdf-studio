@@ -741,12 +741,16 @@ export function scrollThumbIntoView(container, index) {
   item?.scrollIntoView({ block: 'nearest' });
 }
 
-export function renderOutline(container, toc, { onGo, onAdd, onRemove, onRename, canEdit }) {
+export function renderOutline(container, toc, { onGo, onAdd, onAuto, onRemove, onRename, canEdit }) {
   container.textContent = '';
   if (canEdit) {
-    container.append(h('div', { class: 'prop-row' }, h('button', {
-      class: 'btn small', text: '＋ 今のページをしおりに追加', onclick: onAdd,
-    })));
+    container.append(h('div', { class: 'prop-row', style: 'flex-direction:column;align-items:stretch;gap:4px' }, [
+      h('button', { class: 'btn small', text: '＋ 今のページをしおりに追加', onclick: onAdd }),
+      h('button', {
+        class: 'btn small', text: '見出しから自動で作る', onclick: onAuto,
+        title: '文字の大きさから見出しを見つけて、しおり（目次）を作ります',
+      }),
+    ]));
   }
   if (!toc || !toc.length) {
     container.append(h('div', { class: 'prop-empty', text: 'しおりがありません。' }));

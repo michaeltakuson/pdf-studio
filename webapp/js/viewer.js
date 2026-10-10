@@ -66,9 +66,16 @@ export class Viewer extends EventTarget {
     // own ordinary fetch() call (which the shim does intercept), and handing
     // pdf.js the resulting bytes via `data` sidesteps pdf.js's URL handling
     // entirely: there is no longer a network decision for it to make.
-    const response = await fetch(new URL(url, window.location.href).href);
-    if (!response.ok) throw new Error(`PDFの取得に失敗しました (status ${response.status})`);
-    const data = new Uint8Array(await response.arrayBuffer());
+    let data;
+    if (url instanceof Uint8Array) {
+      // Bytes straight from a file the user picked: shown at once, before
+      // the editing engine has even finished loading.
+      data = url;
+    } else {
+      const response = await fetch(new URL(url, window.location.href).href);
+      if (!response.ok) throw new Error(`PDFの取得に失敗しました (status ${response.status})`);
+      data = new Uint8Array(await response.arrayBuffer());
+    }
 
     if (this.loadingTask) {
       // Tear down through the loading task: it owns the worker port, and the
@@ -129,6 +136,10 @@ export class Viewer extends EventTarget {
     const links = document.createElement('div');
     links.className = 'link-layer';
 
+    // Form fields are real inputs laid over the page, filled in where they are.
+    const forms = document.createElement('div');
+    forms.className = 'form-layer';
+
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'annot-layer');
     svg.setAttribute('viewBox', `0 0 ${base.width} ${base.height}`);
@@ -139,7 +150,7 @@ export class Viewer extends EventTarget {
     draw.setAttribute('viewBox', `0 0 ${base.width} ${base.height}`);
     draw.setAttribute('preserveAspectRatio', 'none');
 
-    wrap.append(canvas, textLayer, links, svg, draw);
+    wrap.append(canvas, textLayer, links, forms, svg, draw);
     this.container.append(wrap);
 
     return {
@@ -149,6 +160,7 @@ export class Viewer extends EventTarget {
       canvas,
       textLayer,
       links,
+      forms,
       svg,
       draw,
       width: base.width,

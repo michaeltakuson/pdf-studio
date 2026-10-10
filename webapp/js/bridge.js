@@ -1,125 +1,82 @@
 /**
- * The whole reason webapp/ exists: it makes the app run with no server at
- * all. Everything the original app.js used to POST to FastAPI is instead
- * answered here, inside the same tab, by a Python interpreter compiled to
- * WebAssembly (Pyodide) running PyMuPDF's wasm build.
+ * The seam between the page and the PDF engine.
  *
- * The trick is that app.js is not aware of any of this — it still calls
- * `fetch('/api/...')` exactly as it did against the real server. This file
- * replaces `window.fetch` with a router that recognises those `/api/` calls,
- * translates them into a `dispatch(action, payload)` call into Python, and
- * wraps the answer back into a real `Response` object. Everything else
- * (fonts, pdf.js's own asset fetches) is passed through to the real fetch
- * untouched.
+ * The rest of the app talks to the engine the way it would talk to a server:
+ * `fetch('/api/...')`. Nothing is ever sent anywhere. This file replaces
+ * `window.fetch` with a router that recognises those calls, turns each into
+ * an (action, payload) message for the engine — Python and PyMuPDF compiled
+ * to WebAssembly, running in a worker (engine-worker.js) — and wraps the
+ * answer back into a real `Response`. Everything else passes through to the
+ * real fetch untouched.
  *
- * The one thing a fetch shim cannot intercept is a full page navigation —
- * `window.location.href = downloadUrl` — so the download button in app.js is
- * the one call site that was changed to call `window.pdfStudioDownload()`
- * (defined at the bottom of this file) instead.
+ * Because the engine lives in a worker, the page never waits on it: a PDF can
+ * be shown the moment it is picked, while the engine is still starting, and
+ * the interface stays live while a large file is being written.
  */
-
-const PYODIDE_VERSION = '0.28.0';
-const PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
-const WHEEL_NAME = 'pymupdf-1.28.2-cp313-abi3-pyodide_2025_0_wasm32.whl';
-const PY_MODULES = [
-  '__init__', 'common', 'textap', 'annots', 'content', 'pages', 'export',
-  'forms', 'measure', 'compare', 'signing', 'accessibility', 'session', 'bridge',
-];
-
-// Faces the PDF writer has been given so far (see ensureFonts below).
-const loadedFonts = new Set();
-let fontToolsPromise = null;
 
 function setBootStatus(text) {
   const node = document.getElementById('pyodideBootStatus');
   if (node) node.textContent = text;
 }
 
-function bootFailed(err) {
-  console.error(err);
-  const node = document.getElementById('pyodideBootStatus');
-  if (node) {
-    node.textContent = `起動に失敗しました: ${err.message || err}`;
-    node.classList.add('error');
-  }
-}
-
-let pdfstudioBridge = null;
-let pyodide = null;
 const realFetch = window.fetch.bind(window);
 let resolveReady;
-const ready = new Promise((resolve) => { resolveReady = resolve; });
+let rejectReady;
+const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+ready.catch(() => {});
 
-// Installed synchronously, before anything else on the page runs an `import`.
-// pdf.js captures a reference to `fetch` when its own module is first
-// evaluated, which happens as soon as app.js's module graph is instantiated
-// — long before Pyodide has finished booting. If the shim were installed
-// only at the end of boot(), that early capture would already hold the
-// native fetch and every /api/doc/{id}/file request would go straight to
-// the real network (and 404, since there is no server) instead of here.
+// Installed before anything else on the page runs, so no module can capture
+// the native fetch first.
 installFetchShim();
 
-async function boot() {
-  setBootStatus('実行環境を読み込んでいます…');
-  const script = document.createElement('script');
-  script.src = `${PYODIDE_CDN}pyodide.js`;
-  await new Promise((resolve, reject) => {
-    script.onload = resolve;
-    script.onerror = () => reject(new Error('pyodide.js を取得できませんでした'));
-    document.head.append(script);
-  });
+const worker = new Worker(new URL('./engine-worker.js', import.meta.url));
+const waiting = new Map();
+let nextId = 1;
 
-  pyodide = await loadPyodide({ indexURL: PYODIDE_CDN });
+worker.addEventListener('message', (event) => {
+  const message = event.data || {};
+  if (message.type === 'status') { setBootStatus(message.text); return; }
+  if (message.type === 'ready') {
+    setBootStatus('準備完了');
+    window.pdfStudioReady = true;
+    resolveReady();
+    document.getElementById('pyodideBoot')?.classList.add('done');
+    document.dispatchEvent(new CustomEvent('pdfstudio:ready'));
+    return;
+  }
+  if (message.type === 'failed') { engineFailed(message.message); return; }
+  const resolve = waiting.get(message.id);
+  if (resolve) { waiting.delete(message.id); resolve(message.result); }
+});
+worker.addEventListener('error', (event) => engineFailed(event.message || 'エンジンを起動できませんでした'));
 
-  setBootStatus('PDF エンジン（PyMuPDF）を読み込んでいます…');
-  await pyodide.loadPackage('micropip');
-  const micropip = pyodide.pyimport('micropip');
-
-  const wheelUrl = new URL(`../vendor/pymupdf-wasm/${WHEEL_NAME}`, import.meta.url);
-  const wheelResponse = await realFetch(wheelUrl);
-  if (!wheelResponse.ok) throw new Error(`PyMuPDF wasm を取得できませんでした (${wheelResponse.status})`);
-  const wheelBytes = new Uint8Array(await wheelResponse.arrayBuffer());
-  pyodide.FS.writeFile(`/${WHEEL_NAME}`, wheelBytes);
-  await micropip.install(`emfs:/${WHEEL_NAME}`);
-
-  setBootStatus('アプリ本体を読み込んでいます…');
-  pyodide.FS.mkdirTree('/home/pyodide/pdfstudio');
-  await Promise.all(PY_MODULES.map(async (name) => {
-    const url = new URL(`../py/pdfstudio/${name}.py`, import.meta.url);
-    const response = await realFetch(url);
-    if (!response.ok) throw new Error(`${name}.py を取得できませんでした (${response.status})`);
-    const text = await response.text();
-    pyodide.FS.writeFile(`/home/pyodide/pdfstudio/${name}.py`, text);
-  }));
-  pyodide.runPython(`
-import sys
-if '/home/pyodide' not in sys.path:
-    sys.path.insert(0, '/home/pyodide')
-import importlib
-import pdfstudio.bridge
-importlib.reload(pdfstudio.bridge)
-`);
-  pdfstudioBridge = pyodide.pyimport('pdfstudio.bridge');
-
-  setBootStatus('準備完了');
-  resolveReady();
-  document.dispatchEvent(new CustomEvent('pdfstudio:ready'));
-  const overlay = document.getElementById('pyodideBoot');
-  if (overlay) overlay.classList.add('done');
+function engineFailed(detail) {
+  console.error(detail);
+  const node = document.getElementById('pyodideBootStatus');
+  if (node) { node.textContent = `読み込めませんでした: ${detail}`; node.classList.add('error'); }
+  document.getElementById('pyodideBoot')?.classList.add('failed');
+  rejectReady(new Error(detail));
+  // Anything already waiting on the engine is answered rather than left hanging.
+  for (const [id, resolve] of waiting) {
+    waiting.delete(id);
+    resolve({ status: 503, json: { detail: `編集機能を読み込めませんでした（${detail}）` } });
+  }
+  document.dispatchEvent(new CustomEvent('pdfstudio:failed', { detail }));
 }
 
-// ==================================================================== bridge call
-
-function callBridge(action, payload) {
-  const pyPayload = pyodide.toPy(payload || {});
-  let pyResult;
-  try {
-    pyResult = pdfstudioBridge.dispatch(action, pyPayload);
-    return pyResult.toJs({ dict_converter: Object.fromEntries });
-  } finally {
-    pyPayload.destroy();
-    if (pyResult && typeof pyResult.destroy === 'function') pyResult.destroy();
-  }
+/** Ask the engine to do something; resolves with its {status, json|data, ...}. */
+function callEngine(action, payload) {
+  return new Promise((resolve) => {
+    const id = nextId;
+    nextId += 1;
+    waiting.set(id, resolve);
+    // File contents are handed over, not copied: a 50 MB PDF would otherwise
+    // exist twice for a moment.
+    const transfer = [];
+    if (payload?.data instanceof Uint8Array) transfer.push(payload.data.buffer);
+    for (const file of payload?.files || []) if (file.data instanceof Uint8Array) transfer.push(file.data.buffer);
+    worker.postMessage({ id, action, payload }, transfer);
+  });
 }
 
 function resultToResponse(result) {
@@ -157,7 +114,7 @@ async function readPayload(init, extra) {
       filename: f.name, data: await fileBytes(f),
     })));
     const file = body.get('file');
-    if (file) { out.name = file.name; out.data = await fileBytes(file); out._file = file; }
+    if (file) { out.name = file.name; out.data = await fileBytes(file); }
     const password = body.get('password');
     if (password != null) out.password = password;
     return out;
@@ -210,7 +167,7 @@ async function route(url, init) {
   const SIMPLE = {
     undo: 'undo', compress: 'compress', nup: 'nup', split: 'split', images: 'images',
     'extract-ranges': 'pages.extract-ranges', 'ocr-apply': 'ocr.apply',
-    outline: 'outline.set', metadata: 'metadata.set',
+    outline: 'outline.set', metadata: 'metadata.set', snapshot: 'snapshot', 'outline-auto': 'outline.auto',
   };
   if (rest.length === 1 && SIMPLE[rest[0]] && method === 'POST') {
     return { action: SIMPLE[rest[0]], payload: await readPayload(init, base) };
@@ -350,67 +307,19 @@ function installFetchShim() {
     const url = new URL(typeof input === 'string' ? input : input.url, window.location.href);
     if (url.pathname.startsWith('/api/')) {
       const matched = await route(url, init);
-      if (matched) {
-        await ready;
-        if (Array.isArray(matched.payload?.annots)) await ensureFonts(matched.payload.fonts);
-        // Give the browser one frame to paint a progress indicator: the call
-        // below runs Python on this same thread and blocks until it returns.
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        const result = callBridge(matched.action, matched.payload);
-        return resultToResponse(result);
+      if (!matched) {
+        return new Response(JSON.stringify({ detail: `未対応の操作です: ${url.pathname}` }), {
+          status: 404, headers: { 'Content-Type': 'application/json' },
+        });
       }
-      return new Response(JSON.stringify({ detail: `未対応の操作です: ${url.pathname}` }), {
-        status: 404, headers: { 'Content-Type': 'application/json' },
-      });
+      if (matched.status) return resultToResponse(matched);   // answered without the engine
+      try {
+        await ready;
+      } catch (err) {
+        return resultToResponse({ status: 503, json: { detail: `編集機能を読み込めませんでした（${err.message}）` } });
+      }
+      return resultToResponse(await callEngine(matched.action, matched.payload));
     }
     return realFetch(input, init);
   };
 }
-
-// ==================================================================== fonts
-
-/**
- * Hand the PDF writer the font files it is about to embed, and the subsetter
- * that cuts them down to the characters used.
- *
- * Both are fetched only when text is first saved — most sessions that only
- * read or highlight never pay for them — and the browser cache makes every
- * later use instant. If either fails (offline, say) saving still works: the
- * writer falls back to a standard Japanese font reference.
- */
-async function ensureFonts(files) {
-  const wanted = (files || []).filter((name) => /^[\w.-]+\.ttf$/.test(name) && !loadedFonts.has(name));
-  if (!wanted.length) return;
-  try {
-    pyodide.FS.mkdirTree('/fonts');
-    await Promise.all(wanted.map(async (name) => {
-      const response = await realFetch(new URL(`../vendor/fonts/${name}`, import.meta.url));
-      if (!response.ok) throw new Error(`${name}: ${response.status}`);
-      pyodide.FS.writeFile(`/fonts/${name}`, new Uint8Array(await response.arrayBuffer()));
-      loadedFonts.add(name);
-    }));
-    fontToolsPromise = fontToolsPromise || pyodide.loadPackage('fonttools');
-    await fontToolsPromise;
-  } catch (err) {
-    console.warn('フォントの準備に失敗しました（標準フォントで保存します）', err);
-  }
-}
-
-// ==================================================================== download
-
-/** The one call the fetch shim cannot reach: a full-page navigation. */
-window.pdfStudioDownload = function pdfStudioDownload(docId) {
-  const result = callBridge('download', { docId });
-  const bytes = result.data instanceof Uint8Array ? result.data : new Uint8Array(result.data || []);
-  const blob = new Blob([bytes], { type: result.mediaType || 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = result.filename || 'document.pdf';
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
-};
-
-boot().catch(bootFailed);

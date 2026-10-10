@@ -129,6 +129,11 @@ const P = {
   width: '<path d="M4 6h16" stroke-width="1"/><path d="M4 11h16" stroke-width="2.200"/><path d="M4 17.500h16" stroke-width="3.600"/>',
   dash: '<path d="M4 7h16"/><path d="M4 12h16" stroke-dasharray="4 3"/><path d="M4 17h16" stroke-dasharray="1.500 3"/>',
   opacity: '<circle cx="12" cy="12" r="8.500"/><path d="M12 3.500v17M12 8h7M12 12h8.500M12 16h7" opacity=".6"/>',
+  whiteout: '<rect x="3" y="9" width="18" height="7" rx="1"/><path d="M7 9v7M3 20h18" opacity=".6"/><path d="M15 5l4 4" />',
+  snapshot: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="12" cy="12" r="3"/>',
+  study: '<rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M6.500 10h4" /><rect x="12" y="8.500" width="6" height="3" fill="currentColor" stroke="none"/><path d="M6.500 14.500h11"/>',
+  translate: '<path d="M4 6h9M8.500 4v2M6 6c.5 3 2.500 5.500 5.500 7M11 6c-.5 3-2.500 5.500-6 7"/><path d="m13 20 3.500-9 3.500 9M14.200 17h4.600"/>',
+  web: '<circle cx="12" cy="12" r="8.500"/><path d="M3.500 12h17M12 3.500c3 3 3 14 0 17M12 3.500c-3 3-3 14 0 17"/>',
   text2: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
 };
 

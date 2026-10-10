@@ -281,6 +281,81 @@ def set_outline(doc: pymupdf.Document, toc: list) -> None:
     doc.set_toc(clean)
 
 
+def auto_outline(doc: pymupdf.Document, limit: int = 500) -> list[list]:
+    """Guess a table of contents from the text itself.
+
+    A heading is a short line set noticeably larger (or bolder) than the body
+    text. Lecture slides have no body text to compare against, so when few
+    headings turn up each page's most prominent line is taken as its title.
+    """
+    from collections import Counter
+
+    weight: Counter = Counter()
+    lines: list[dict] = []
+    for page in doc:
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                spans = [s for s in line.get("spans", []) if s.get("text", "").strip()]
+                if not spans:
+                    continue
+                text = " ".join("".join(s["text"] for s in spans).split())
+                size = round(max(float(s.get("size", 0)) for s in spans), 1)
+                weight[size] += len(text)
+                lines.append({
+                    "page": page.number, "y": line["bbox"][1], "text": text, "size": size,
+                    "bold": any(int(s.get("flags", 0)) & 16 for s in spans),
+                })
+    if not lines:
+        return []
+    body = weight.most_common(1)[0][0]
+
+    def plausible(line: dict) -> bool:
+        text = line["text"]
+        if not 2 <= len(text) <= 80 or text.replace(" ", "").isdigit():
+            return False
+        return text[-1] not in "。、,;"
+
+    heads = [
+        l for l in lines if plausible(l)
+        and (l["size"] >= body * 1.18 or (l["bold"] and l["size"] >= body * 1.04 and len(l["text"]) <= 40))
+    ]
+    # A line that recurs on page after page is a running header, not a heading.
+    seen: Counter = Counter()
+    for text, _page in {(h["text"], h["page"]) for h in heads}:
+        seen[text] += 1
+    heads = [h for h in heads if seen[h["text"]] <= max(2, doc.page_count * 0.25)]
+    if len(heads) < max(3, doc.page_count * 0.15):
+        # Slides: one title per page — the largest line, the higher one on a tie.
+        heads = []
+        for number in range(doc.page_count):
+            mine = [l for l in lines if l["page"] == number and plausible(l)]
+            if mine:
+                heads.append(max(mine, key=lambda l: (l["size"], -l["y"])))
+        for head in heads:
+            head["size"] = body + 99  # all one level
+    sizes = sorted({h["size"] for h in heads}, reverse=True)[:3]
+    toc: list[list] = []
+    for head in sorted(heads, key=lambda l: (l["page"], l["y"])):
+        level = sizes.index(head["size"]) + 1 if head["size"] in sizes else 3
+        if toc and toc[-1][1] == head["text"] and toc[-1][2] == head["page"] + 1:
+            continue
+        toc.append([level, head["text"], head["page"] + 1])
+        if len(toc) >= limit:
+            break
+    return toc
+
+
+def snapshot(page: pymupdf.Page, rect, dpi: int = 200) -> bytes:
+    """A picture of one region of a page, markup included."""
+    # The rectangle arrives as the reader sees the page, which is also the
+    # frame get_pixmap clips in.
+    clip = pymupdf.Rect(rect)
+    clip.normalize()
+    return page.get_pixmap(clip=clip & page.rect, dpi=int(dpi), alpha=False).tobytes("png")
+
+
 def _font():
     from . import content
 

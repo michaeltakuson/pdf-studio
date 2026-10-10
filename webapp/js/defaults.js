@@ -17,6 +17,7 @@ const BASE = {
   callout:       { stroke: '#2f6df6', fill: '#ffffff', width: 1, opacity: 1,
                    font: { family: 'gothic', size: 12, color: '#2f6df6', align: 'left', bold: false } },
   mark:          { stroke: '#1c1f26', width: 1.8, opacity: 1, markSize: 14 },
+  whiteout:      { stroke: '#ffffff', fill: '#ffffff', width: 0, opacity: 1 },
   note:          { stroke: '#ffd23d', opacity: 1 },
   pen:           { stroke: '#e0403a', width: 2, opacity: 1 },
   marker:        { stroke: '#ffe14d', width: 12, opacity: 0.4 },

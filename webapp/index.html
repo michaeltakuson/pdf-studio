@@ -5,37 +5,46 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PDF Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231e5bb8'/%3E%3Cpath d='M10 7h8l5 5v13H10z' fill='%23fff'/%3E%3Cpath d='M13 16h7M13 20h7' stroke='%231e5bb8' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1e5bb8">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="css/app.css">
 <style>
+  /* While the PDF engine loads, the app is already usable for reading; this
+     is a small notice in the corner, not a wall in front of the page. */
   #pyodideBoot {
-    position: fixed; inset: 0; z-index: 9999;
-    display: flex; align-items: center; justify-content: center;
-    background: #f3f5f8; color: #1c1f26;
-    font: 14px/1.7 "Segoe UI", "Yu Gothic UI", "Hiragino Sans", system-ui, sans-serif;
-    transition: opacity .25s ease;
+    position: fixed; right: 14px; bottom: 40px; z-index: 180;
+    display: flex; align-items: center; gap: 11px;
+    max-width: min(420px, calc(100vw - 28px));
+    background: #ffffff; color: #1c1f26;
+    border: 1px solid #d3d8e0; border-left: 3px solid #1e5bb8; border-radius: 7px;
+    box-shadow: 0 2px 10px rgba(16, 20, 30, .18);
+    padding: 10px 14px;
+    font: 12.5px/1.55 "Segoe UI", "Yu Gothic UI", "Hiragino Sans", system-ui, sans-serif;
+    transition: opacity .3s ease, transform .3s ease;
   }
-  #pyodideBoot.done { opacity: 0; pointer-events: none; }
-  #pyodideBoot .card { max-width: 440px; text-align: center; padding: 32px; }
-  #pyodideBoot h1 { font-size: 20px; margin: 0 0 16px; color: #1e5bb8; }
+  #pyodideBoot.done { opacity: 0; transform: translateY(8px); pointer-events: none; }
   #pyodideBoot .spinner {
-    width: 32px; height: 32px; margin: 0 auto 18px;
-    border: 3px solid #d5dbe5; border-top-color: #1e5bb8; border-radius: 50%;
+    flex: none; width: 20px; height: 20px; margin: 0;
+    border: 2.5px solid #d5dbe5; border-top-color: #1e5bb8; border-radius: 50%;
     animation: pyodide-spin 0.9s linear infinite;
   }
+  #pyodideBoot.failed .spinner { display: none; }
   @keyframes pyodide-spin { to { transform: rotate(360deg); } }
+  #pyodideBoot b { display: block; font-size: 13px; }
   #pyodideBootStatus { color: #5a6474; }
   #pyodideBootStatus.error { color: #c62828; }
-  #pyodideBoot .note { margin-top: 18px; font-size: 12px; color: #7a8494; }
+  #pyodideBoot .note { color: #7a8494; font-size: 11.5px; }
 </style>
 </head>
 <body data-theme="light">
 
-<div id="pyodideBoot">
-  <div class="card">
-    <div class="spinner"></div>
-    <h1>PDF Studio を起動しています</h1>
-    <div id="pyodideBootStatus">PDF エンジンを読み込んでいます…</div>
-    <div class="note">初回だけ少し時間がかかります（目安30秒〜1分）。<br>2回目以降はブラウザに保存されたものを使うので、すぐに起動します。<br>PDFはこの端末の中だけで処理され、どこにも送信されません。</div>
+<div id="pyodideBoot" role="status">
+  <div class="spinner"></div>
+  <div>
+    <b>編集機能を準備しています</b>
+    <span id="pyodideBootStatus">実行環境を読み込んでいます…</span>
+    <div class="note">初回は30秒〜1分。待つ間もPDFを開いて読めます。</div>
   </div>
 </div>
 
@@ -166,6 +175,13 @@
   </div>
 </div>
 
+<script>
+  // Offline use and fast restarts. Registered on the public site and on
+  // localhost; a plain file:// page cannot have one.
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+</script>
 <script type="module" src="js/bridge.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
