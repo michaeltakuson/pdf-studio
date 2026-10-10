@@ -330,6 +330,8 @@ async function pdfFromImages(files) {
 /** The list of recently opened files on the start screen. */
 async function showRecent() {
   const holder = $('#recentFiles');
+  // An older cached page (offline, mid-update) may not have this element.
+  if (!holder) return;
   const list = await recentFiles();
   holder.textContent = '';
   holder.hidden = !list.length;
@@ -2544,7 +2546,18 @@ viewer.setSpread(getPref('spread')); ribbon.refresh(); }, active: () => !!getPre
     ]) },
 };
 
-const custom = (fn) => ({ custom: fn });
+// A live group is rebuilt only when what it shows would change: the tool in
+// hand, what is selected, and that thing's current formatting.
+const formatKey = () => {
+  const selection = selectedAnnots();
+  const first = selection[0];
+  return JSON.stringify([
+    tools.tool, tools.markKind, selection.map((a) => a.id),
+    first ? [first.style, first.icon, first.stampIndex, first.tool] : null,
+    styleFor(tools.tool), styleFor('freetext'), !!state.editor,
+  ]);
+};
+const custom = (fn, key = formatKey) => ({ custom: fn, key });
 
 const tabs = [
   { id: 'home', label: 'ホーム', groups: [
@@ -2577,7 +2590,8 @@ const tabs = [
     { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'headerfooter'] }, { col: ['crop', 'uncrop'] }] },
     { label: '対象', items: [custom(() => h('div', { class: 'rhint', text: hasDoc()
       ? `対象: ${describePages(targetPages())}。左のページ一覧で Ctrl / Shift を押しながら選ぶと、複数ページをまとめて操作できます。`
-      : 'PDFを開くと、ページの回転・削除・並べ替え・結合ができます。' }))] },
+      : 'PDFを開くと、ページの回転・削除・並べ替え・結合ができます。' }),
+    () => (hasDoc() ? describePages(targetPages()) : ''))] },
   ] },
   { id: 'review', label: '校閲', groups: [
     { label: 'コメント', items: [{ big: 'comments' }, { col: ['note', 'callout', 'annotexport'] }] },

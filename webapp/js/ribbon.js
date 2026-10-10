@@ -64,19 +64,15 @@ export class Ribbon {
   }
 
   _render(force) {
-    // A control being typed into or dragged must not be replaced under the
-    // user; it is refreshed when they let go of it.
-    const active = document.activeElement;
-    if (!force && active && this.bodyEl.contains(active)
-      && active.matches('input:not([type=checkbox]):not([type=color]), textarea')) {
-      if (!this._waiting) {
-        this._waiting = true;
-        active.addEventListener('blur', () => { this._waiting = false; this.refresh(); }, { once: true });
-      }
-      return;
-    }
-    const scroll = this.bodyEl.scrollLeft;
+    // A full rebuild only when the tab changes. Otherwise buttons are updated
+    // where they stand: replacing a button between the press and the release
+    // of a click would swallow that click, and state changes (a save
+    // finishing, the page scrolling) can arrive at any moment.
+    if (!force && this._built === this.active) { this._update(); return; }
+    const scroll = force && this._built !== this.active ? 0 : this.bodyEl.scrollLeft;
     this.bodyEl.textContent = '';
+    this._buttons = [];
+    this._customs = [];
     const tab = this.tabs.find((candidate) => candidate.id === this.active);
     for (const group of tab.groups) {
       const body = el('div', 'rgroup-body');
@@ -84,13 +80,53 @@ export class Ribbon {
         const node = this._item(item);
         if (node) body.append(node);
       }
-      if (!body.childElementCount) continue;
       const wrap = el('div', 'rgroup');
       wrap.append(body, el('div', 'rgroup-label', group.label));
+      // A group whose only content is a live control that currently has
+      // nothing to show stays in place, hidden, so it can come back.
+      wrap.hidden = !body.childElementCount || [...body.children].every((child) => child.dataset.empty === '1');
       this.bodyEl.append(wrap);
     }
+    this._built = this.active;
     this.bodyEl.scrollLeft = scroll;
     this._hint?.();
+  }
+
+  _update() {
+    for (const { node, command } of this._buttons) {
+      const disabled = command.enabled ? !command.enabled() : false;
+      if (node.disabled !== disabled) node.disabled = disabled;
+      node.classList.toggle('active', !!(command.active && command.active()));
+    }
+    const active = document.activeElement;
+    for (const custom of this._customs) {
+      const key = custom.item.key ? custom.item.key() : null;
+      if (key !== null && key === custom.key) continue;
+      // A control being typed into or dragged is left alone until it is let go of.
+      if (active && custom.holder.contains(active)
+        && active.matches('input:not([type=checkbox]):not([type=color]), textarea')) {
+        if (!custom.waiting) {
+          custom.waiting = true;
+          active.addEventListener('blur', () => { custom.waiting = false; this.refresh(); }, { once: true });
+        }
+        continue;
+      }
+      this._fill(custom, key);
+    }
+    this._hint?.();
+  }
+
+  _fill(custom, key) {
+    custom.key = key;
+    custom.holder.textContent = '';
+    const content = custom.item.custom();
+    if (content) custom.holder.append(content);
+    custom.holder.dataset.empty = content ? '0' : '1';
+    const group = custom.holder.closest('.rgroup');
+    if (group) {
+      const body = group.querySelector('.rgroup-body');
+      group.hidden = [...body.children].every((child) => child.dataset.empty === '1');
+    }
   }
 
   _item(item) {
@@ -106,7 +142,13 @@ export class Ribbon {
       for (const id of item.grid) { const b = this._button(id, 'icon'); if (b) grid.append(b); }
       return grid;
     }
-    if (item.custom) return item.custom();
+    if (item.custom) {
+      const holder = el('div', 'rcustom');
+      const custom = { holder, item, key: undefined, waiting: false };
+      this._customs.push(custom);
+      this._fill(custom, item.key ? item.key() : null);
+      return holder;
+    }
     return null;
   }
 
@@ -128,6 +170,7 @@ export class Ribbon {
     // Pressing a ribbon button must not take the caret out of an open text box.
     button.addEventListener('mousedown', (event) => event.preventDefault());
     button.addEventListener('click', (event) => command.run(event, button));
+    this._buttons.push({ node: button, command });
     return button;
   }
 }

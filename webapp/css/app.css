@@ -691,3 +691,6 @@ body.present .annot-layer .hit, body.present .text-layer, body.present .form-lay
 
 /* ---------------------------------------------------------------- two-page spread */
 .pages.spread { flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: flex-start; min-width: 0; margin: 0 auto; box-sizing: content-box; }
+
+.rcustom { display: contents; }
+.rcustom[data-empty="1"] { display: none; }
