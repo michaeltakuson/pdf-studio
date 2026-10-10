@@ -2720,6 +2720,22 @@ function nudge(dx, dy) {
   return true;
 }
 
+// A drop-down, slider or checkbox used with the mouse hands the keyboard back
+// to the page afterwards. Otherwise Delete, Ctrl+Z and the arrow keys would
+// keep going to the control (an arrow key meant to nudge a shape would change
+// the font instead). Reached with Tab, a control keeps the keyboard.
+const CHOOSERS = 'select, input[type="range"], input[type="checkbox"], input[type="radio"], input[type="color"]';
+let pointerChooser = null;
+document.addEventListener('pointerdown', (e) => {
+  pointerChooser = e.target.closest?.(CHOOSERS) || null;
+}, true);
+document.addEventListener('change', (e) => {
+  const control = e.target;
+  if (control !== pointerChooser || control.closest('.dialog-backdrop, dialog, .popover')) return;
+  pointerChooser = null;
+  if (document.activeElement === control) control.blur();
+}, true);
+
 window.addEventListener('keydown', (e) => {
   if (document.querySelector('.dialog-backdrop')) return;
   const target = e.target;
