@@ -1833,6 +1833,8 @@ function placeSelectionBar() {
   showBarAt(cx, cy, [
     single && (single.type === 'freetext' || single.type === 'note')
       ? barButton('edittext', '文字を編集', () => startTextEdit(single.id), { text: true }) : null,
+    single && single.type === 'image' && single.image && !single.flags?.locked
+      ? barButton('crop', '切り抜く（画像の一部だけを残す）', () => cropImage(single), { text: true }) : null,
     single && single.type !== 'freetext'
       ? barButton('comments', 'コメントを付ける', () => showRightPanel('props')) : null,
     sep(),

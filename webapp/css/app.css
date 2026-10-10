@@ -609,6 +609,7 @@ body[data-theme="dark"] .tab.file { color: #10203a; }
   box-shadow: var(--shadow); padding: 20px 22px; width: min(520px, 94vw); max-height: 92vh; overflow: auto;
 }
 .dialog.wide { width: min(680px, 96vw); }
+.dialog:focus { outline: none; }
 .dialog h2 { margin: 0 0 8px; font-size: 16px; }
 .dialog p { margin: 0 0 10px; color: var(--text-dim); white-space: pre-wrap; }
 .dialog .warn-box { background: var(--surface-2); border-left: 3px solid #e8a33d; padding: 9px 12px; border-radius: 5px; margin-bottom: 14px; color: var(--text); white-space: pre-wrap; }

@@ -50,6 +50,22 @@ function mount(backdrop, finish) {
     if (e.key === 'Escape' && !isComposing(e)) { e.preventDefault(); finish(null); }
   });
   document.body.append(backdrop);
+  // The keyboard belongs to the dialog from the start. Without this, a dialog
+  // with nothing focused in it (or one only dragged in with the mouse) could
+  // not be closed with Escape, and Tab would wander the page behind it.
+  const dialog = backdrop.querySelector('.dialog');
+  dialog?.setAttribute('tabindex', '-1');
+  setTimeout(() => { if (backdrop.isConnected && !backdrop.contains(document.activeElement)) dialog?.focus({ preventScroll: true }); }, 0);
+  const onKey = (e) => {
+    if (!backdrop.isConnected) { document.removeEventListener('keydown', onKey, true); return; }
+    if (e.key !== 'Escape' || isComposing(e) || backdrop.contains(e.target)) return;
+    const all = document.querySelectorAll('.dialog-backdrop');
+    if (all[all.length - 1] !== backdrop || document.querySelector('.menu, .popover')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    finish(null);
+  };
+  document.addEventListener('keydown', onKey, true);
 }
 
 export function confirmDialog(options) {
@@ -164,6 +180,13 @@ export function customDialog({ build, onConfirm, ...options }) {
     parts.confirm.addEventListener('click', async () => {
       const value = onConfirm ? await onConfirm() : true;
       if (value !== undefined && value !== null && value !== false) finish(value);
+    });
+    // Enter confirms, as in the other dialogs, unless it has a job where it is.
+    parts.backdrop.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || isComposing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.target.closest('textarea, button, select, a, [contenteditable]')) return;
+      e.preventDefault();
+      parts.confirm.click();
     });
     mount(parts.backdrop, finish);
   });
