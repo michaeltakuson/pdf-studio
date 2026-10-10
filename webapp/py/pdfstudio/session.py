@@ -35,25 +35,54 @@ class Doc:
         # label -> pdf bytes, most recent first. Kept short: this is an
         # in-tab undo net for destructive operations, not archival storage.
         self.snapshots: list[tuple[str, bytes]] = []
+        # id -> canonical form of each annotation as last read or written, so
+        # a save only rewrites the ones that actually changed.
+        self.baseline: dict[str, str] = {}
 
     def snapshot(self, label: str) -> str:
         self.snapshots.insert(0, (label, self.doc.tobytes()))
-        del self.snapshots[20:]
+        # Bounded by size as well as count: twenty copies of a 50 MB scan
+        # would take the tab down.
+        total = 0
+        for index, (_, data) in enumerate(self.snapshots):
+            total += len(data)
+            if index >= 1 and (index >= 15 or total > 300_000_000):
+                del self.snapshots[index:]
+                break
         return label
 
+    def restore(self) -> str | None:
+        """Go back to the most recent snapshot. Returns its label, or None."""
+        if not self.snapshots:
+            return None
+        label, data = self.snapshots.pop(0)
+        self.doc.close()
+        self.doc = pymupdf.open("pdf", data)
+        return label
+
+    def replace(self, data: bytes) -> None:
+        self.doc.close()
+        self.doc = pymupdf.open("pdf", data)
+
     def commit(self) -> None:
-        """Rewrite the in-memory document from scratch.
+        """Mark the document as changed.
+
+        The server build rewrote the whole file here after every operation.
+        In the browser that rewrite runs on the page's own thread — on a 50 MB
+        scan it froze the tab for several seconds per click — and it is only
+        the file handed to the user that needs it. So the rewrite happens once,
+        in bytes(), when the document actually leaves the app.
+        """
+        self.changed = True
+
+    def bytes(self) -> bytes:
+        """The finished file, rewritten from scratch.
 
         A plain incremental save leaves superseded objects in the file — the
         "overwriting does not delete the page" trap. Rewriting with garbage
         collection is what actually drops deleted content.
         """
-        data = self.doc.tobytes(garbage=3, deflate=True, clean=True)
-        self.doc.close()
-        self.doc = pymupdf.open("pdf", data)
-
-    def bytes(self) -> bytes:
-        return self.doc.tobytes(garbage=3, deflate=True, clean=True)
+        return self.doc.tobytes(garbage=3, deflate=True)
 
     def close(self) -> None:
         try:

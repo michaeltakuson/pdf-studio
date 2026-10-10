@@ -11,10 +11,13 @@ already applied), which matches a pdf.js viewport at scale 1.
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 
 import pymupdf
+
+from . import textap
 
 from .common import (
     hex_to_rgb,
@@ -45,7 +48,6 @@ PDF_TO_TYPE = {
     pymupdf.PDF_ANNOT_STAMP: "stamp",
     pymupdf.PDF_ANNOT_CARET: "caret",
     pymupdf.PDF_ANNOT_INK: "ink",
-    pymupdf.PDF_ANNOT_FILE_ATTACHMENT: "fileattachment",
     pymupdf.PDF_ANNOT_REDACT: "redact",
 }
 
@@ -83,7 +85,7 @@ PRIVATE_KEY = "PDFStudio"
 # real reply annotations that Acrobat and Foxit display in their own panels.
 PRIVATE_FIELDS = (
     "checked", "group", "measure", "callout", "tool",
-    "label", "stampIndex", "overlayText",
+    "label", "stampIndex", "overlayText", "autoWidth", "autoHeight",
 )
 
 # Review states, as the spec spells them in /State with /StateModel /Review.
@@ -190,10 +192,65 @@ def _read_geometry(annot: pymupdf.Annot, kind: str) -> dict:
     return out
 
 
-def annot_to_json(annot: pymupdf.Annot, doc: pymupdf.Document, page_index: int) -> dict | None:
+def _ensure_id(annot: pymupdf.Annot, doc: pymupdf.Document, seen: set) -> str:
+    """Every annotation needs a name that survives saving.
+
+    Object numbers do not: the file is renumbered on every commit. /NM is the
+    spec's own unique-name key, so the model id lives there. Files from other
+    tools may leave it out or repeat it across pages, in which case one is
+    assigned here — in the working copy only.
+    """
+    name = annot.info.get("id") or ""
+    if not name or name in seen:
+        name = "ps-" + uuid.uuid4().hex[:12]
+        doc.xref_set_key(annot.xref, "NM", pymupdf.get_pdf_str(name))
+    seen.add(name)
+    return name
+
+
+def _appearance_png(annot: pymupdf.Annot, page: pymupdf.Page) -> str | None:
+    """Render an annotation's own appearance, as the page viewer would see it.
+
+    Image stamps (signatures, seals, pasted pictures) have no description the
+    overlay could redraw from, so the overlay shows this picture instead.
+    """
+    try:
+        rect = annot.rect
+        scale = min(3.0, 1800 / max(rect.width, rect.height, 1))
+        pix = annot.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=True)
+        if page.rotation:
+            pix = _rotate_pixmap(pix, page.rotation)
+        return "data:image/png;base64," + base64.b64encode(pix.tobytes("png")).decode("ascii")
+    except Exception:
+        return None
+
+
+def _rotate_pixmap(pix: pymupdf.Pixmap, degrees: int) -> pymupdf.Pixmap:
+    """Turn a picture clockwise by a multiple of 90 degrees."""
+    degrees %= 360
+    if not degrees:
+        return pix
+    turned = degrees in (90, 270)
+    width, height = (pix.height, pix.width) if turned else (pix.width, pix.height)
+    scratch = pymupdf.open()
+    try:
+        page = scratch.new_page(width=width, height=height)
+        # insert_image turns anti-clockwise for positive angles.
+        page.insert_image(page.rect, pixmap=pix, rotate=(360 - degrees) % 360, keep_proportion=False)
+        return page.get_pixmap(alpha=True)
+    finally:
+        scratch.close()
+
+
+def annot_to_json(annot: pymupdf.Annot, doc: pymupdf.Document, page_index: int,
+                  name: str | None = None) -> dict | None:
     kind = PDF_TO_TYPE.get(annot.type[0])
     if kind is None:
         return None
+    private = _read_private(annot, doc)
+    if kind == "stamp" and "stampIndex" not in private:
+        # Not one of the fourteen spec stamps: a picture.
+        kind = "image"
 
     info = annot.info
     colors = annot.colors or {}
@@ -223,7 +280,7 @@ def annot_to_json(annot: pymupdf.Annot, doc: pymupdf.Document, page_index: int) 
 
     flags = annot.flags
     data = {
-        "id": info.get("id") or uuid.uuid4().hex[:12],
+        "id": name or info.get("id") or uuid.uuid4().hex[:12],
         "page": page_index,
         "type": kind,
         "rect": list(annot.rect),
@@ -249,8 +306,20 @@ def annot_to_json(annot: pymupdf.Annot, doc: pymupdf.Document, page_index: int) 
 
     if kind == "freetext":
         data["text"] = info.get("content", "")
+        try:
+            q_kind, q_value = doc.xref_get_key(annot.xref, "Q")
+            if q_kind == "int":
+                style["font"]["align"] = {0: "left", 1: "center", 2: "right"}.get(int(q_value), "left")
+        except Exception:
+            pass
+        style["font"]["family"] = textap.family_of(style["font"].get("family"))
+        style["font"]["bold"] = False
+        if private.get("font"):
+            style["font"].update(private["font"])
+    if kind == "image":
+        data["image"] = _appearance_png(annot, annot.parent)
+        data["contents"] = "" if data["contents"] == "Image Stamp" else data["contents"]
 
-    private = _read_private(annot, doc)
     if private:
         # Pressure profiles and review state only exist in our own key.
         if "strokes" in data and private.get("pressure"):
@@ -290,7 +359,7 @@ def _read_state(doc: pymupdf.Document, xref: int) -> str | None:
     return STATES_REVERSE.get(value.strip("()/"))
 
 
-def read_page(page: pymupdf.Page) -> list[dict]:
+def read_page(page: pymupdf.Page, seen: set | None = None) -> list[dict]:
     """Read one page, folding reply annotations into their parents.
 
     A reply is an annotation carrying /IRT (in reply to) with /RT /R. Acrobat
@@ -299,18 +368,19 @@ def read_page(page: pymupdf.Page) -> list[dict]:
     ours show the same conversation.
     """
     doc = page.parent
+    seen = seen if seen is not None else set()
     parents: dict[int, dict] = {}
     order: list[dict] = []
     responses: list[tuple[int, pymupdf.Annot]] = []
 
     for annot in page.annots():
-        if annot.type[0] in SKIP_TYPES:
+        if annot.type[0] not in PDF_TO_TYPE:
             continue
         irt = annot.irt_xref
         if irt and irt != annot.xref:
             responses.append((irt, annot))
             continue
-        item = annot_to_json(annot, doc, page.number)
+        item = annot_to_json(annot, doc, page.number, _ensure_id(annot, doc, seen))
         if item:
             parents[annot.xref] = item
             order.append(item)
@@ -320,7 +390,7 @@ def read_page(page: pymupdf.Page) -> list[dict]:
         if parent is None:
             # An orphaned reply (its parent was removed elsewhere) is still a
             # comment someone wrote, so surface it rather than dropping it.
-            item = annot_to_json(annot, doc, page.number)
+            item = annot_to_json(annot, doc, page.number, _ensure_id(annot, doc, seen))
             if item:
                 order.append(item)
             continue
@@ -343,8 +413,9 @@ def read_page(page: pymupdf.Page) -> list[dict]:
 
 def read_document(doc: pymupdf.Document) -> list[dict]:
     out = []
+    seen: set = set()
     for page in doc:
-        out.extend(read_page(page))
+        out.extend(read_page(page, seen))
     return out
 
 
@@ -359,6 +430,29 @@ def _quads(item: dict) -> list[pymupdf.Quad]:
             continue
         out.append(pymupdf.Quad((q[0], q[1]), (q[2], q[3]), (q[4], q[5]), (q[6], q[7])))
     return out
+
+
+def _decode_data_url(value) -> bytes | None:
+    if not value or not isinstance(value, str) or "," not in value:
+        return None
+    try:
+        return base64.b64decode(value.split(",", 1)[1])
+    except Exception:
+        return None
+
+
+def _set_raw_rect(page: pymupdf.Page, xref: int, rect) -> None:
+    """Move an annotation by rewriting /Rect, leaving its appearance alone.
+
+    For a picture the appearance *is* the content. Going through the normal
+    setter would have MuPDF redraw it; the viewer scales the existing form to
+    the new box on its own.
+    """
+    box = pymupdf.Rect(rect) * ~page.transformation_matrix
+    box.normalize()
+    page.parent.xref_set_key(
+        xref, "Rect", f"[{box.x0:.3f} {box.y0:.3f} {box.x1:.3f} {box.y1:.3f}]"
+    )
 
 
 def _create(page: pymupdf.Page, item: dict) -> pymupdf.Annot | None:
@@ -385,11 +479,14 @@ def _create(page: pymupdf.Page, item: dict) -> pymupdf.Annot | None:
 
     if kind == "freetext":
         callout = item.get("callout")
+        serif = textap.FAMILIES[textap.family_of(font.get("family"))][2]
         return page.add_freetext_annot(
             rect,
-            item.get("text", item.get("contents", "")),
+            item.get("text", item.get("contents", "")) or "",
             fontsize=font["size"],
-            fontname=font["family"],
+            # What other editors will offer if the box is edited there; the
+            # appearance itself is drawn by textap with an embedded face.
+            fontname="TiRo" if serif else "Helv",
             text_color=hex_to_rgb(font["color"]),
             fill_color=hex_to_rgb(style["fill"]),
             border_width=style["width"],
@@ -397,8 +494,22 @@ def _create(page: pymupdf.Page, item: dict) -> pymupdf.Annot | None:
             callout=[pymupdf.Point(p) for p in callout] if callout else None,
             opacity=style["opacity"],
             align={"left": 0, "center": 1, "right": 2}.get(font["align"], 0),
-            rotate=int(style["rotate"]),
         )
+
+    if kind == "image":
+        data = _decode_data_url(item.get("image"))
+        if not data:
+            return None
+        if page.rotation:
+            # The picture arrives upright as the reader sees it; the page
+            # stores it in its own unrotated frame.
+            turned = _rotate_pixmap(pymupdf.Pixmap(data), 360 - page.rotation)
+            data = turned.tobytes("png")
+        annot = page.add_stamp_annot(rect, stamp=data)
+        # add_stamp_annot shrinks the box to the picture's proportions; the
+        # box the user drew is the one to keep.
+        _set_raw_rect(page, annot.xref, rect)
+        return annot
 
     if kind == "line":
         pts = item.get("points") or []
@@ -462,8 +573,52 @@ def _create(page: pymupdf.Page, item: dict) -> pymupdf.Annot | None:
     return None
 
 
+def _created_date(item: dict) -> str:
+    """Keep the original creation date when an annotation is rewritten."""
+    value = item.get("created")
+    if isinstance(value, str) and len(value) >= 19:
+        digits = "".join(ch for ch in value[:19] if ch.isdigit())
+        if len(digits) == 14:
+            return "D:" + digits
+    return now_pdf_date()
+
+
+def _info(item: dict) -> dict:
+    contents = item.get("contents", "") or ""
+    if item["type"] == "freetext":
+        contents = item.get("text", contents) or ""
+    return dict(
+        content=contents,
+        title=item.get("author", "") or "",
+        subject=item.get("subject", "") or "",
+        creationDate=_created_date(item),
+        modDate=now_pdf_date(),
+    )
+
+
+def _flag_bits(item: dict) -> int:
+    flags = 0
+    f = item.get("flags") or {}
+    if f.get("print", True):
+        flags |= pymupdf.PDF_ANNOT_IS_PRINT
+    if f.get("locked"):
+        flags |= pymupdf.PDF_ANNOT_IS_LOCKED
+    if f.get("readOnly"):
+        flags |= pymupdf.PDF_ANNOT_IS_READ_ONLY
+    if f.get("hidden"):
+        flags |= pymupdf.PDF_ANNOT_IS_HIDDEN
+    return flags
+
+
 def _apply_style(annot: pymupdf.Annot, item: dict) -> None:
     kind = item["type"]
+    if kind == "image":
+        # No update() here: that would have MuPDF redraw the appearance, and
+        # the appearance is the picture.
+        annot.set_info(**_info(item))
+        annot.parent.parent.xref_set_key(annot.xref, "F", str(_flag_bits(item)))
+        return
+
     style = {**_default_style(), **(item.get("style") or {})}
 
     stroke = hex_to_rgb(style["stroke"])
@@ -492,26 +647,8 @@ def _apply_style(annot: pymupdf.Annot, item: dict) -> None:
         )
 
     annot.set_opacity(float(style.get("opacity", 1.0)))
-
-    flags = 0
-    f = item.get("flags") or {}
-    if f.get("print", True):
-        flags |= pymupdf.PDF_ANNOT_IS_PRINT
-    if f.get("locked"):
-        flags |= pymupdf.PDF_ANNOT_IS_LOCKED
-    if f.get("readOnly"):
-        flags |= pymupdf.PDF_ANNOT_IS_READ_ONLY
-    if f.get("hidden"):
-        flags |= pymupdf.PDF_ANNOT_IS_HIDDEN
-    annot.set_flags(flags)
-
-    annot.set_info(
-        content=item.get("contents", "") or "",
-        title=item.get("author", "") or "",
-        subject=item.get("subject", "") or "",
-        creationDate=item.get("createdPdf") or now_pdf_date(),
-        modDate=now_pdf_date(),
-    )
+    annot.set_flags(_flag_bits(item))
+    annot.set_info(**_info(item))
 
     blend = style.get("blend")
     if blend:
@@ -527,8 +664,18 @@ def _write_private(annot: pymupdf.Annot, doc: pymupdf.Document, item: dict) -> N
         payload["pressure"] = pressure
     for key in PRIVATE_FIELDS:
         value = item.get(key)
-        if value not in (None, [], False):
-            payload[key] = value
+        # Not `value not in (None, [], False)`: 0 == False in Python, and a
+        # stamp index of 0 ("Approved") is a real value that must be kept.
+        if value is None or value is False or value == []:
+            continue
+        payload[key] = value
+    if item["type"] == "freetext":
+        font = (item.get("style") or {}).get("font") or {}
+        payload["font"] = {
+            "family": textap.family_of(font.get("family")),
+            "bold": bool(font.get("bold")),
+            "align": font.get("align") or "left",
+        }
     if len(payload) == 1:
         return
     doc.xref_set_key(annot.xref, PRIVATE_KEY, pymupdf.get_pdf_str(json.dumps(payload)))
@@ -564,44 +711,170 @@ def _write_responses(page: pymupdf.Page, parent: pymupdf.Annot, item: dict) -> N
         doc.xref_set_key(marker.xref, "StateModel", pymupdf.get_pdf_str("Review"))
 
 
-def write_document(doc: pymupdf.Document, items: list[dict]) -> int:
-    """Replace every managed annotation in `doc` with `items`.
+# Fields that do not describe the annotation itself: dates the writer stamps,
+# object numbers, the (large, immutable) picture data and the line breaks the
+# browser derives from everything else.
+_VOLATILE = {"modified", "created", "createdPdf", "xref", "image", "layout"}
 
-    Widgets, links and popups are left untouched — they are owned by other
-    parts of the app, not by the markup model.
+
+def _canon(value):
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return round(float(value), 2) + 0.0
+    if isinstance(value, dict):
+        return {
+            k: _canon(v) for k, v in value.items()
+            if k not in _VOLATILE and not str(k).startswith("_")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canon(v) for v in value]
+    return str(value)
+
+
+def canonical(item: dict) -> str:
+    """A comparable form of an annotation, for "did this one change?"."""
+    return json.dumps(_canon(item), sort_keys=True, ensure_ascii=False)
+
+
+def baseline_of(items: list[dict]) -> dict:
+    return {item["id"]: canonical(item) for item in items if item.get("id")}
+
+
+def _managed(annot: pymupdf.Annot) -> bool:
+    return annot.type[0] in PDF_TO_TYPE
+
+
+def write_document(doc: pymupdf.Document, items: list[dict], baseline: dict | None = None) -> int:
+    """Make the document's markup match `items`.
+
+    Only what changed is touched. An annotation whose model entry is identical
+    to `baseline` (what was last read or written) stays exactly as it is in the
+    file — which matters for anything made in another tool, whose appearance
+    this app could not reproduce if it rebuilt it. Annotation kinds the model
+    does not cover (attachments, links, form fields, media) are never touched.
+
+    With no baseline every managed annotation is rebuilt.
     """
-    for page in doc:
-        # Deleting an annotation also removes its replies, which invalidates
-        # any handles taken beforehand — so rescan after every removal.
-        while True:
-            target = next(
-                (a for a in page.annots() if a.type[0] not in SKIP_TYPES), None
-            )
-            if target is None:
-                break
-            page.delete_annot(target)
-
-    written = 0
-    by_page: dict[int, list[dict]] = {}
+    wanted: dict[int, dict[str, dict]] = {}
     for item in items:
-        by_page.setdefault(int(item.get("page", 0)), []).append(item)
+        if not item.get("id"):
+            item["id"] = uuid.uuid4().hex[:12]
+        wanted.setdefault(int(item.get("page", 0)), {})[item["id"]] = item
 
-    for index, page_items in by_page.items():
-        if index < 0 or index >= doc.page_count:
-            continue
-        page = doc[index]
-        for incoming in page_items:
+    book = textap.FontBook(doc)
+    fresh: dict[str, str] = {}
+    written = 0
+
+    for page in doc:
+        page_items = wanted.get(page.number, {})
+        existing: dict[str, int] = {}
+        replies: dict[int, list[int]] = {}
+        for annot in page.annots():
+            if not _managed(annot):
+                continue
+            irt = annot.irt_xref
+            if irt and irt != annot.xref:
+                replies.setdefault(irt, []).append(annot.xref)
+                continue
+            existing[annot.info.get("id") or f"xref-{annot.xref}"] = annot.xref
+
+        doomed: list[int] = []
+        todo: list[dict] = []
+        for ident, incoming in page_items.items():
+            key = canonical(incoming)
+            xref = existing.get(ident)
+            if xref is None:
+                todo.append(incoming)
+            elif baseline is not None and baseline.get(ident) == key:
+                fresh[ident] = key
+                written += 1
+            elif incoming.get("type") == "image":
+                # Moved or resized: same picture, new box.
+                item = to_page(page, incoming)
+                target = page.load_annot(xref)
+                if target is not None:
+                    _set_raw_rect(page, xref, item["rect"])
+                    _apply_style(target, item)
+                    _write_private(target, doc, item)
+                fresh[ident] = key
+                written += 1
+            else:
+                doomed.append(xref)
+                todo.append(incoming)
+        for ident, xref in existing.items():
+            if ident not in page_items:
+                doomed.append(xref)
+
+        for xref in doomed:
+            # Replies first: left behind, they would resurface as stray notes.
+            for target_xref in replies.get(xref, []) + [xref]:
+                try:
+                    target = page.load_annot(target_xref)
+                except Exception:
+                    target = None
+                if target is not None:
+                    page.delete_annot(target)
+
+        for incoming in todo:
             if not incoming.get("rect") and incoming.get("points"):
                 incoming["rect"] = rect_of(incoming["points"])
+            if not incoming.get("rect"):
+                continue
             # The browser sends what the reader sees; PyMuPDF wants the page as
             # authored. On an unrotated page these are the same thing.
             item = to_page(page, incoming)
-            annot = _create(page, item)
+            try:
+                annot = _create(page, item)
+            except Exception:
+                annot = None
             if annot is None:
                 continue
             _apply_style(annot, item)
+            if item["type"] == "freetext":
+                style = {**_default_style(), **(item.get("style") or {})}
+                font = {**_default_style()["font"], **(style.get("font") or {})}
+                textap.write_appearance(page, annot, incoming, style, font, book)
             _write_private(annot, doc, item)
+            doc.xref_set_key(annot.xref, "NM", pymupdf.get_pdf_str(item["id"]))
             if item.get("replies") or item.get("state"):
                 _write_responses(page, annot, item)
+            fresh[item["id"]] = canonical(incoming)
             written += 1
+
+    book.finish()
+    if baseline is not None:
+        baseline.clear()
+        baseline.update(fresh)
     return written
+
+
+def has_managed(doc: pymupdf.Document) -> bool:
+    return any(_managed(annot) for page in doc for annot in page.annots())
+
+
+def view_bytes(doc: pymupdf.Document) -> bytes:
+    """The document as the page renderer should see it: without the markup.
+
+    The overlay draws every managed annotation itself, so the renderer must
+    not draw them a second time — but it should still draw everything else
+    (form fields, annotation kinds the model does not cover).
+
+    Rather than copy the document and delete the markup from the copy (three
+    passes over a large file), the markup is flagged hidden for the length of
+    one serialisation and then put back.
+    """
+    touched: list[tuple[int, str | None]] = []
+    for page in doc:
+        for annot in page.annots():
+            if not _managed(annot):
+                continue
+            kind, value = doc.xref_get_key(annot.xref, "F")
+            previous = value if kind == "int" else None
+            touched.append((annot.xref, previous))
+            doc.xref_set_key(annot.xref, "F", str(int(previous or 0) | pymupdf.PDF_ANNOT_IS_HIDDEN))
+    try:
+        return doc.tobytes()
+    finally:
+        for xref, previous in touched:
+            doc.xref_set_key(xref, "F", previous if previous is not None else "null")

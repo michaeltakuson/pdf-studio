@@ -2,7 +2,7 @@
 // The source material calls this the most under-used feature in every PDF
 // tool, so here it is always on rather than an opt-in "set as default" menu.
 
-const KEY = 'pdfstudio.defaults.v1';
+const KEY = 'pdfstudio.defaults.v2';
 
 const BASE = {
   highlight:     { stroke: '#ffe14d', opacity: 0.45 },
@@ -13,19 +13,21 @@ const BASE = {
   // For FreeText, `stroke` mirrors the font colour: the PDF draws border,
   // callout line and text all in the /DA colour.
   freetext:      { stroke: '#1c1f26', fill: null, width: 0, opacity: 1,
-                   font: { family: 'japan', size: 12, color: '#1c1f26', align: 'left' } },
+                   font: { family: 'gothic', size: 12, color: '#1c1f26', align: 'left', bold: false } },
   callout:       { stroke: '#2f6df6', fill: '#ffffff', width: 1, opacity: 1,
-                   font: { family: 'japan', size: 12, color: '#2f6df6', align: 'left' } },
+                   font: { family: 'gothic', size: 12, color: '#2f6df6', align: 'left', bold: false } },
+  mark:          { stroke: '#1c1f26', width: 1.8, opacity: 1, markSize: 14 },
   note:          { stroke: '#ffd23d', opacity: 1 },
   pen:           { stroke: '#e0403a', width: 2, opacity: 1 },
   marker:        { stroke: '#ffe14d', width: 12, opacity: 0.4 },
-  line:          { stroke: '#e0403a', width: 1.5, opacity: 1, lineEnds: ['none', 'openArrow'] },
+  line:          { stroke: '#e0403a', width: 1.5, opacity: 1, lineEnds: ['none', 'none'] },
+  arrow:         { stroke: '#e0403a', width: 1.5, opacity: 1, lineEnds: ['none', 'closedArrow'] },
   square:        { stroke: '#e0403a', fill: null, width: 1.5, opacity: 1, borderStyle: 'solid', cloudIntensity: 0 },
   circle:        { stroke: '#e0403a', fill: null, width: 1.5, opacity: 1 },
   polygon:       { stroke: '#e0403a', fill: null, width: 1.5, opacity: 1, cloudIntensity: 0 },
   polyline:      { stroke: '#e0403a', fill: null, width: 1.5, opacity: 1 },
   stamp:         { stroke: '#1b7f3b', opacity: 1, width: 2, stampIndex: 0, stampText: '確認済 {date}',
-                   font: { family: 'japan', size: 14, color: '#1b7f3b', align: 'center' } },
+                   font: { family: 'gothic', size: 14, color: '#1b7f3b', align: 'center' } },
   measureDistance: { stroke: '#2f6df6', width: 1.5, opacity: 1 },
   measurePerimeter: { stroke: '#2f6df6', width: 1.5, opacity: 1 },
   // The fill marks the region measured, so it has to stay see-through: an
@@ -38,7 +40,7 @@ const BASE = {
   count:         { stroke: '#e256a5', fill: '#e256a5', width: 1, opacity: 1 },
   calibrate:     { stroke: '#2f6df6', width: 1.5, opacity: 1 },
   redact:        { stroke: '#000000', fill: '#000000', opacity: 1,
-                   font: { family: 'japan', size: 9, color: '#ffffff', align: 'left' } },
+                   font: { family: 'gothic', size: 9, color: '#ffffff', align: 'left' } },
 };
 
 const FULL_STYLE = {
@@ -50,7 +52,7 @@ const FULL_STYLE = {
   borderStyle: 'solid',
   cloudIntensity: 0,
   lineEnds: ['none', 'none'],
-  font: { family: 'japan', size: 11, color: '#000000', align: 'left' },
+  font: { family: 'gothic', size: 11, color: '#000000', align: 'left', bold: false },
   rotate: 0,
   blend: null,
 };
@@ -61,13 +63,21 @@ try {
 } catch { stored = {}; }
 
 export function styleFor(tool) {
-  return structuredClone({ ...FULL_STYLE, ...(BASE[tool] || {}), ...(stored[tool] || {}) });
+  const base = BASE[tool] || {};
+  const saved = stored[tool] || {};
+  const style = { ...FULL_STYLE, ...base, ...saved };
+  // The font is a nested object: merge it too, or remembering one property
+  // (say the size) would drop the others back to nothing.
+  style.font = { ...FULL_STYLE.font, ...(base.font || {}), ...(saved.font || {}) };
+  return structuredClone(style);
 }
 
 /** Remember a property the user just changed, so the next annotation inherits it. */
 export function remember(tool, patch) {
   if (!BASE[tool]) return;
-  stored[tool] = { ...(stored[tool] || {}), ...patch };
+  const previous = stored[tool] || {};
+  stored[tool] = { ...previous, ...patch };
+  if (patch.font) stored[tool].font = { ...(previous.font || {}), ...patch.font };
   try { localStorage.setItem(KEY, JSON.stringify(stored)); } catch { /* private mode */ }
 }
 
@@ -77,15 +87,15 @@ export function resetTool(tool) {
 }
 
 export const SWATCHES = [
-  '#ffe14d', '#ffa53d', '#e0403a', '#e256a5',
-  '#8b5cf6', '#2f6df6', '#22b3a4', '#3fb950',
-  '#1c1f26', '#ffffff',
+  '#000000', '#1c1f26', '#5d6675', '#9aa3b2', '#ffffff', '#e0403a', '#b00020', '#ff7a1a',
+  '#ffa53d', '#ffe14d', '#3fb950', '#1b7f3b', '#22b3a4', '#2f6df6', '#12305e', '#8b5cf6',
+  '#e256a5', '#8a5a2b', '#aee9ff', '#b9f5c6', '#ffd3e0', '#fff3a8', '#e6d6ff', '#ffd9b0',
 ];
 
 export const PREFS_KEY = 'pdfstudio.prefs.v1';
 
 const prefDefaults = {
-  theme: 'dark',
+  theme: 'light',
   author: '',
   penOnly: false,
   leftHanded: false,

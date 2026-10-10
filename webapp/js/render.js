@@ -1,6 +1,8 @@
 // Draws the annotation model into each page's SVG overlay.
 // Everything here works in unscaled PDF points; the SVG viewBox does the zoom.
 
+import { textCss } from './textedit.js';
+
 const NS = 'http://www.w3.org/2000/svg';
 
 export function el(name, attrs = {}, children = []) {
@@ -156,11 +158,12 @@ export const STANDARD_STAMPS = [
   'NOT FOR PUBLIC RELEASE', 'SOLD', 'TOP SECRET', 'DRAFT',
 ];
 
-export function renderAnnot(annot) {
+export function renderAnnot(annot, { editingId = null } = {}) {
   const style = annot.style || {};
   const group = el('g', {
     'data-id': annot.id,
-    class: 'annot hit',
+    'data-type': annot.type,
+    class: `annot hit${annot.type === 'freetext' ? ' is-text' : ''}`,
     opacity: annot.flags?.hidden ? 0.15 : 1,
   });
 
@@ -331,15 +334,37 @@ export function renderAnnot(annot) {
           opacity: style.opacity ?? 1,
         }));
       }
-      const fo = el('foreignObject', {
-        x: x0 + 2, y: y0 + 1, width: Math.max(4, x1 - x0 - 4), height: Math.max(4, y1 - y0 - 2),
-      });
-      const div = document.createElement('div');
-      div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
-      div.style.cssText = `font-family:"Yu Gothic UI","Hiragino Sans",sans-serif;font-size:${font.size || 12}px;line-height:1.25;color:${font.color || '#000'};text-align:${font.align || 'left'};white-space:pre-wrap;word-break:break-word;overflow:hidden;`;
-      div.textContent = annot.text || annot.contents || '';
-      fo.append(div);
-      group.append(fo);
+      // While the box is open in the editor the editor shows the text; a
+      // second copy underneath would show through as a double image.
+      if (annot.id !== editingId) {
+        const fo = el('foreignObject', {
+          class: 'ft-box', x: x0, y: y0, width: Math.max(4, x1 - x0), height: Math.max(4, y1 - y0),
+          overflow: 'visible',
+        });
+        const div = document.createElement('div');
+        div.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+        div.className = 'ft-text';
+        div.style.cssText = `${textCss(font)}width:${Math.max(4, x1 - x0)}px;opacity:${style.opacity ?? 1};`;
+        div.textContent = annot.text || annot.contents || '';
+        fo.append(div);
+        group.append(fo);
+      }
+      break;
+    }
+
+    case 'image': {
+      const [x0, y0, x1, y1] = annot.rect;
+      if (annot.image) {
+        group.append(el('image', {
+          href: annot.image, x: x0, y: y0, width: x1 - x0, height: y1 - y0,
+          preserveAspectRatio: 'none',
+        }));
+      } else {
+        group.append(el('rect', {
+          x: x0, y: y0, width: x1 - x0, height: y1 - y0,
+          fill: '#8884', stroke: '#888', 'stroke-dasharray': '4 3',
+        }));
+      }
       break;
     }
 
@@ -353,6 +378,12 @@ export function renderAnnot(annot) {
         'stroke-width': 0.8,
       }));
       group.append(icon);
+      if (annot.contents) {
+        // Hovering a note shows what it says, as every PDF viewer does.
+        const title = el('title');
+        title.textContent = annot.contents;
+        group.append(title);
+      }
       break;
     }
 
@@ -370,7 +401,7 @@ export function renderAnnot(annot) {
         x: (x0 + x1) / 2, y: (y0 + y1) / 2,
         'text-anchor': 'middle', 'dominant-baseline': 'central',
         fill: style.stroke,
-        'font-size': Math.min((y1 - y0) * 0.55, ((x1 - x0) * 1.5) / Math.max(4, label.length)),
+        'font-size': Math.min((y1 - y0) * 0.55, ((x1 - x0) * 1.12) / Math.max(4, label.length)),
         'font-family': 'Georgia, serif', 'font-weight': 700,
         opacity: style.opacity ?? 1,
       });
@@ -452,32 +483,48 @@ export function renderAnnot(annot) {
 // outline and no handles.
 const FIXED_SIZE = new Set(['note', 'caret']);
 
-export function selectionOverlay(annot) {
+export function selectionOverlay(annot, { single = true, scale = 1 } = {}) {
   const [x0, y0, x1, y1] = annot.rect;
   const group = el('g', { class: 'selection', 'data-id': annot.id });
-  group.append(el('rect', {
-    class: 'sel-box', x: x0 - 2, y: y0 - 2, width: x1 - x0 + 4, height: y1 - y0 + 4,
+  // Handles stay the same size on screen at every zoom level.
+  const half = 4.5 / scale;
+  const handle = (name, hx, hy) => group.append(el('rect', {
+    class: 'handle hit', 'data-handle': name, 'data-id': annot.id,
+    x: hx - half, y: hy - half, width: half * 2, height: half * 2, rx: 1.5 / scale,
   }));
-  if (FIXED_SIZE.has(annot.type)) return group;
+
+  // A line is edited by its two ends, the way it was drawn; a bounding box
+  // with eight handles would only let it be stretched, never re-aimed.
+  if (annot.type === 'line' && (annot.points || []).length >= 2 && single && !annot.flags?.locked) {
+    handle('p0', annot.points[0][0], annot.points[0][1]);
+    handle('p1', annot.points[1][0], annot.points[1][1]);
+    return group;
+  }
+
+  const gap = 2 / scale;
+  group.append(el('rect', {
+    class: 'sel-box', x: x0 - gap, y: y0 - gap, width: x1 - x0 + gap * 2, height: y1 - y0 + gap * 2,
+  }));
+  if (FIXED_SIZE.has(annot.type) || !single || annot.flags?.locked) return group;
+  // Text markup follows the text it marks; it is not something to stretch.
+  if (['highlight', 'underline', 'squiggly', 'strikeout'].includes(annot.type)) return group;
   const handles = [
     ['nw', x0, y0], ['n', (x0 + x1) / 2, y0], ['ne', x1, y0],
     ['e', x1, (y0 + y1) / 2], ['se', x1, y1], ['s', (x0 + x1) / 2, y1],
     ['sw', x0, y1], ['w', x0, (y0 + y1) / 2],
   ];
-  for (const [name, hx, hy] of handles) {
-    group.append(el('rect', {
-      class: 'handle hit', 'data-handle': name, 'data-id': annot.id,
-      x: hx - 3.5, y: hy - 3.5, width: 7, height: 7, rx: 1.5,
-    }));
-  }
+  for (const [name, hx, hy] of handles) handle(name, hx, hy);
   return group;
 }
 
-export function renderPage(view, annots, selectedIds) {
+export function renderPage(view, annots, selectedIds, options = {}) {
   view.svg.textContent = '';
   const selected = new Set(selectedIds);
-  for (const annot of annots) view.svg.append(renderAnnot(annot));
+  for (const annot of annots) view.svg.append(renderAnnot(annot, options));
+  const single = selected.size === 1;
   for (const annot of annots) {
-    if (selected.has(annot.id)) view.svg.append(selectionOverlay(annot));
+    if (selected.has(annot.id) && annot.id !== options.editingId) {
+      view.svg.append(selectionOverlay(annot, { single, scale: options.scale || 1 }));
+    }
   }
 }

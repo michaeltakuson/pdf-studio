@@ -94,25 +94,94 @@ def find_text_blocks(page: pymupdf.Page) -> list[dict]:
     return blocks
 
 
+def find_text_lines(page: pymupdf.Page) -> list[dict]:
+    """Lines of body text, each with what is needed to retype it in place."""
+    out = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            spans = [s for s in line.get("spans", []) if s.get("text", "").strip()]
+            if not spans:
+                continue
+            direction = line.get("dir") or (1, 0)
+            if abs(direction[0] - 1) > 0.01 or abs(direction[1]) > 0.01:
+                continue  # vertical or slanted text: not something to retype in a box
+            first = max(spans, key=lambda s: len(s.get("text", "")))
+            flags = int(first.get("flags", 0))
+            out.append({
+                "text": "".join(s.get("text", "") for s in line.get("spans", [])).rstrip(),
+                "rect": list(line["bbox"]),
+                "origin": list(spans[0].get("origin") or (line["bbox"][0], line["bbox"][3])),
+                "size": round(float(first.get("size", 11)), 2),
+                "colour": "#%06x" % (int(first.get("color", 0)) & 0xFFFFFF),
+                "serif": bool(flags & 4),
+                "bold": bool(flags & 16),
+                "font": first.get("font", ""),
+                "page": page.number,
+            })
+    return out
+
+
+def body_font(serif: bool = False, bold: bool = False) -> pymupdf.Font:
+    """A Japanese face for text written into the page itself.
+
+    MuPDF's built-in CJK fallback draws kanji in their Chinese forms, so the
+    bundled Japanese faces are used wherever they can be found.
+    """
+    from . import textap
+
+    regular, heavy, _ = textap.FAMILIES["mincho" if serif else "gothic"]
+    data = textap._font_bytes(heavy if (bold and heavy) else regular)
+    if data:
+        try:
+            return pymupdf.Font(fontbuffer=data)
+        except Exception:
+            pass
+    return pymupdf.Font("japan-s" if serif else "japan")
+
+
+def subset(doc: pymupdf.Document) -> None:
+    """Shrink fonts embedded whole by the text writer down to what is used."""
+    try:
+        doc.subset_fonts()
+    except Exception:
+        pass
+
+
 def replace_text(page: pymupdf.Page, rect: list[float], new_text: str, *,
                  size: float = 11, colour: str = "#000000",
-                 align: int = 0, background: str | None = None) -> None:
+                 align: int = 0, background: str | None = None,
+                 origin: list[float] | None = None,
+                 serif: bool = False, bold: bool = False) -> None:
     """Remove the text inside `rect` and lay new text in its place.
 
     Redaction is what actually deletes the old glyphs — covering them would
-    leave the original selectable underneath.
+    leave the original selectable underneath. Pictures and line art under the
+    box are left alone, so table rules and backgrounds survive.
     """
     box = pymupdf.Rect(rect)
-    page.add_redact_annot(box, fill=hex_to_rgb(background) if background else None)
-    page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)
+    # A hair smaller than the line box, so neighbouring lines are not caught.
+    target = pymupdf.Rect(box.x0, box.y0 + box.height * 0.12, box.x1, box.y1 - box.height * 0.12)
+    page.add_redact_annot(target, fill=hex_to_rgb(background) if background else None)
+    try:
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=0)
+    except TypeError:  # older PyMuPDF without the graphics switch
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)
     if not new_text:
         return
-    grown = pymupdf.Rect(box.x0, box.y0 - 1, box.x1 + 2, box.y1 + 4)
-    page.insert_htmlbox(
-        grown,
-        f'<span style="font-size:{size}pt;color:{colour};'
-        f'text-align:{["left", "center", "right"][align]}">{_escape(new_text)}</span>',
-    )
+    font = body_font(serif, bold)
+    start = pymupdf.Point(origin) if origin else pymupdf.Point(box.x0, box.y1 - size * 0.2)
+    writer = pymupdf.TextWriter(page.rect)
+    for index, line in enumerate(str(new_text).split("\n")):
+        width = font.text_length(line, size)
+        x = start.x
+        if align == 1:
+            x = box.x0 + (box.width - width) / 2
+        elif align == 2:
+            x = box.x1 - width
+        writer.append(pymupdf.Point(x, start.y + index * size * 1.3), line, font=font, fontsize=size)
+    writer.write_text(page, color=hex_to_rgb(colour))
 
 
 def search_replace(doc: pymupdf.Document, needle: str, replacement: str, *,
@@ -135,6 +204,8 @@ def search_replace(doc: pymupdf.Document, needle: str, replacement: str, *,
                 colour=colour,
             )
             count += 1
+    if count:
+        subset(doc)
     return count
 
 

@@ -13,11 +13,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp" / "py"))
 
 import pymupdf
 
-from backend import annots, common, pages
+from pdfstudio import annots, common, pages
 
 HERE = Path(__file__).parent
 NEEDLE = "12,340,000"

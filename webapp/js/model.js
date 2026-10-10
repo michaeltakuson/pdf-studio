@@ -15,6 +15,10 @@ export const store = {
 
 let undoStack = [];
 let redoStack = [];
+// Operations that rewrite the document itself (page moves, redaction, ...)
+// cannot be replayed from here; the engine keeps a snapshot for each one and
+// this counts how many can still be stepped back over.
+let structuralDepth = 0;
 
 export function subscribe(fn) {
   listeners.add(fn);
@@ -29,15 +33,16 @@ export function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
 
-export function loadDocument({ id, name, pages, annots }) {
+export function loadDocument({ id, name, pages, annots, undoDepth = 0 }, { keepName = false } = {}) {
   store.docId = id;
-  store.name = name;
+  if (!keepName || !store.name) store.name = name;
   store.pages = pages;
   store.annots = (annots || []).map(normalise);
   store.selection = [];
   store.dirty = false;
   undoStack = [];
   redoStack = [];
+  structuralDepth = undoDepth;
   emit('document');
 }
 
@@ -72,13 +77,18 @@ function run(command, reason) {
   emit(reason || 'change');
 }
 
+/**
+ * Step back once. Returns 'structural' when the next thing to undo is a
+ * document-level operation, which the caller has to ask the engine to restore.
+ */
 export function undo() {
   const command = undoStack.pop();
-  if (!command) return;
+  if (!command) return structuralDepth > 0 ? 'structural' : null;
   command.undo();
   redoStack.push(command);
   store.dirty = true;
   emit('change');
+  return 'done';
 }
 
 export function redo() {
@@ -91,7 +101,8 @@ export function redo() {
 }
 
 export const history = {
-  get canUndo() { return undoStack.length > 0; },
+  get canUndo() { return undoStack.length > 0 || structuralDepth > 0; },
+  get nextIsStructural() { return undoStack.length === 0 && structuralDepth > 0; },
   get canRedo() { return redoStack.length > 0; },
 };
 
@@ -174,6 +185,23 @@ export function updateAnnots(ids, patch, { merge = null } = {}) {
   redoStack = [];
   store.dirty = true;
   emit('update');
+}
+
+/**
+ * Change an annotation without recording an undo step. For derived values
+ * only — a box re-measured after its font finished loading is not something
+ * the user did, so Ctrl+Z should not stop on it.
+ */
+export function silentUpdate(id, patch) {
+  const target = byId(id);
+  if (!target) return;
+  deepAssign(target, patch);
+  for (const command of undoStack) {
+    for (const snapshot of command.after || []) {
+      if (snapshot.id === id) deepAssign(snapshot, structuredClone(patch));
+    }
+  }
+  emit('derived');
 }
 
 /** Close the current merge run, so the next edit starts a fresh undo step. */

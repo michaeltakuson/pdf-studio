@@ -12,11 +12,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp" / "py"))
 
 import pymupdf
 
-from backend import content, pages
+from pdfstudio import content, pages
 
 HERE = Path(__file__).parent
 
@@ -202,53 +202,67 @@ def main() -> int:
                           "コピー禁止の権限が効いている")
     locked.close()
 
-    # ---------------------------------------------------------------- OCR
-    state = content.tesseract_state()
-    print(f"\n  [OCR] Tesseract: {'導入済み' if state['installed'] else '未導入'}"
-          f" / 日本語: {'あり' if state['japanese'] else 'なし'}")
-    if not state["installed"]:
-        print("  [OCR] OCRのテストは Tesseract 導入後に実行されます（READMEの手順を参照）")
-    else:
-        scan = _scanned_pdf()
-        failures += not check(not scan[0].get_text().strip(),
-                              "OCR前のスキャン風PDFにはテキストが無い")
-        report = content.ocr_document(
-            scan, language="jpn+eng" if state["japanese"] else "eng", dpi=300,
-        )
-        recognised = scan[0].get_text().replace(" ", "")
-        failures += not check(report["pages"] == 1, "OCRが1ページ処理した")
-        failures += not check("redaction" in recognised.lower(),
-                              f"OCRが英字を認識した ({recognised.strip()[:40]!r})")
-        if state["japanese"]:
-            failures += not check("契約金額" in recognised,
-                                  f"OCRが日本語を認識した ({recognised.strip()[:40]!r})")
-            failures += not check("12,340,000" in recognised,
-                                  "OCRが数字を認識した")
-        failures += not check(bool(scan[0].search_for("redaction")),
-                              "OCR後は検索でヒットする（テキスト層が埋まっている）")
-        scan.close()
+    # ---------------------------------------------------------------- OCR text layer
+    # Recognition itself runs in the browser (tesseract.js). What the engine
+    # does is take the recognised words and lay them under the page image, so
+    # that is what is checked here.
+    from pdfstudio import bridge
 
-        # The point of OCR is that the text becomes findable. Tesseract puts
-        # spaces between Japanese characters, so exact search alone would fail.
-        scanned = _scanned_pdf()
-        content.ocr_document(scanned, language="jpn+eng", dpi=300)
-        page = scanned[0]
-        exact = page.search_for("契約金額", flags=pymupdf.TEXTFLAGS_SEARCH)
-        relaxed = content.search_relaxed(page, "契約金額")
-        failures += not check(bool(relaxed),
-                              f"OCR後の日本語を空白無視で検索できる (完全一致={len(exact)}, 空白無視={len(relaxed)})")
-        if relaxed:
-            box = relaxed[0].rect
-            failures += not check(box.width > 5 and box.height > 5,
-                                  f"検索結果の位置が実領域を指している ({tuple(round(v) for v in box)})")
-        scanned.close()
+    scan = _scanned_pdf()
+    opened = bridge.dispatch("open", {"name": "scan.pdf", "data": scan.tobytes()})["json"]
+    scan.close()
+    result = bridge.dispatch("ocr.apply", {"docId": opened["id"], "pages": [{"page": 0, "words": [
+        {"text": "契", "rect": [100, 100, 112, 114]}, {"text": "約", "rect": [112, 100, 124, 114]},
+        {"text": "redaction", "rect": [100, 130, 160, 144]},
+    ]}]})
+    failures += not check(result["status"] == 200 and result["json"]["characters"] == 11,
+                          f"認識結果を埋め込める ({result['json'].get('characters')} 文字)")
+    saved = pymupdf.open("pdf", bridge.dispatch("download", {"docId": opened["id"]})["data"])
+    failures += not check("redaction" in saved[0].get_text(), "埋め込んだ文字が抽出できる")
+    failures += not check(bool(content.search_relaxed(saved[0], "契約")), "埋め込んだ日本語を検索できる")
+    hit = saved[0].search_for("redaction")
+    failures += not check(bool(hit) and abs(hit[0].x0 - 100) < 4 and abs(hit[0].x1 - 160) < 6,
+                          f"検索結果が画像上の位置に重なる ({tuple(round(v) for v in hit[0]) if hit else None})")
+    saved.close()
 
-        # A page that already has text must be left alone, not re-OCR'd.
-        typed = fresh()
-        untouched = content.ocr_document(typed, language="eng", pages=[0])
-        failures += not check(untouched["skipped"] == 1 and untouched["pages"] == 0,
-                              "テキストのあるページはOCRしない")
-        typed.close()
+    # ---------------------------------------------------------------- page layout
+    doc = fresh()
+    before = doc[0].rect
+    pages.add_margins(doc, None, right=170)
+    failures += not check(abs(doc[0].rect.width - before.width - 170) < 0.5 and doc[0].rect.height == before.height,
+                          f"余白を足すと用紙だけが広がる ({before.width:.0f} -> {doc[0].rect.width:.0f})")
+    failures += not check("PDF Studio" in doc[0].get_text(), "余白を足しても本文はそのまま")
+    count = doc.page_count
+    sheets = pymupdf.open("pdf", pages.nup(doc, 4))
+    failures += not check(sheets.page_count == -(-count // 4), f"4面付けで {count} ページが {sheets.page_count} 枚になる")
+    sheets.close()
+    failures += not check(pages.parse_ranges("1-2, 3-", 3) == [[0, 1], [2]], "ページ範囲を読める")
+    failures += not check(pages.parse_ranges("１〜２、３", 3) == [[0, 1], [2]], "全角の数字・記号でも読める")
+    try:
+        pages.parse_ranges("9", 3)
+        failures += not check(False, "範囲外のページを拒否する")
+    except ValueError:
+        failures += not check(True, "範囲外のページを拒否する")
+    import io
+    import zipfile
+    names = zipfile.ZipFile(io.BytesIO(pages.split(doc, "doc", every=2))).namelist()
+    failures += not check(len(names) == -(-count // 2), f"2ページごとに分割できる ({names})")
+    name, media, data = pages.to_images(doc, "doc", [0], dpi=72)
+    failures += not check(media == "image/png" and data[:4] == b"\x89PNG", "ページを画像にできる")
+    doc.close()
+
+    # ---------------------------------------------------------------- editing body text
+    doc = fresh()
+    page = doc[0]
+    line = next(l for l in content.find_text_lines(page) if "12,340,000" in l["text"])
+    content.replace_text(page, line["rect"], "契約金額は 99,000円、担当者は 直井 です。",
+                         size=line["size"], origin=line["origin"], serif=line["serif"])
+    text = page.get_text()
+    failures += not check("99,000" in text and "12,340,000" not in text, "本文の行を書き換えられる（元の文字は残らない）")
+    failures += not check("動作確認用サンプル" in text, "書き換えた行以外はそのまま")
+    fonts = {f[3] for f in page.get_fonts(full=True)}
+    failures += not check(any("BIZ" in f for f in fonts), f"書き換えた文字は同梱の日本語フォントで入る ({sorted(fonts)})")
+    doc.close()
 
     print(f"\n{'すべて成功' if not failures else str(failures) + ' 件失敗'}")
     return 1 if failures else 0

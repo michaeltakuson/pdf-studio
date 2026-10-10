@@ -1,98 +1,123 @@
-import { Viewer } from './viewer.js';
-import { ToolController } from './tools.js';
+import {
+  $, stage, viewer, tools, state, hooks, toast, status, busy, paint, post, docUrl, structural,
+  reloadFrom, errorDetail, downloadBlob, exportVia, finishedPdf, targetPages, describePages,
+} from './ctx.js';
 import * as model from './model.js';
 import { renderPage } from './render.js';
 import {
-  renderContextBar, renderProps, renderComments, renderThumbs, renderOutline,
-  renderSettings, renderTakeoff, keepingFocus, typeLabel,
+  renderFontGroup, renderStyleGroup, renderProps, renderComments, renderThumbs, updateThumbs,
+  scrollThumbIntoView, renderOutline, renderSettings, renderTakeoff, refreshPanel, typeLabel, h, SHORTCUTS,
 } from './panels.js';
 import * as measure from './measure.js';
-import { remember, getPref, setPref } from './defaults.js';
-import { confirmDialog, formDialog, openMenu } from './dialogs.js';
+import { remember, getPref, setPref, styleFor } from './defaults.js';
+import {
+  confirmDialog, formDialog, infoDialog, customDialog, openMenu, openMenuAt, isComposing, node,
+} from './dialogs.js';
+import { Ribbon } from './ribbon.js';
+import { iconSvg } from './icons.js';
+import { TextEditor, fitRect, ensureFontLoaded, LINE_HEIGHT } from './textedit.js';
+import { MARKUP_TOOLS, translated } from './tools.js';
+import { signatureDialog, hankoDialog, normaliseImage, fileToDataUrl } from './stamps.js';
+import * as ops from './docops.js';
 
-const $ = (sel) => document.querySelector(sel);
-
-const stage = $('#stage');
-const viewer = new Viewer($('#pages'), stage);
-const tools = new ToolController(viewer);
-
-const state = {
-  toc: [],
-  filters: { query: '', checked: 'all', author: 'all', state: 'all', type: 'all', sort: 'page' },
-  takeoffSubject: '',
-  searchHits: [],
-  searchIndex: -1,
-  saving: false,
-  fileHandle: null,   // File System Access handle of the opened/saved file, when the browser gives one
-};
-
-// ---------------------------------------------------------------- toast
-
-let toastTimer;
-function toast(message, kind = '') {
-  const node = $('#toast');
-  node.textContent = message;
-  node.className = `toast show ${kind}`;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { node.className = 'toast'; }, 3200);
+for (const holder of document.querySelectorAll('[data-icon]')) {
+  holder.innerHTML = iconSvg(holder.dataset.icon, holder.classList.contains('small') || holder.classList.contains('sb-btn') ? 16 : 18);
 }
 
-function status(message) {
-  $('#statusLeft').textContent = message;
+const hasDoc = () => !!model.store.docId;
+const FLAGS = () => ({ print: true, locked: false, readOnly: false, hidden: false });
+const isTextTool = (tool) => tool === 'freetext' || tool === 'callout';
+
+// ================================================================ opening
+
+async function confirmDiscard() {
+  if (!state.unsaved) return true;
+  return confirmDialog({
+    title: '保存していない変更があります',
+    intro: `「${model.store.name}」への変更はまだファイルに保存されていません。このまま進むと失われます。`,
+    confirmLabel: '保存せずに進む', cancelLabel: '戻る', danger: true,
+  });
 }
 
-// ---------------------------------------------------------------- opening
-
-async function openFile(file, password = '', handle = null) {
-  status('読み込み中…');
-  const form = new FormData();
-  form.append('file', file);
-  if (password) form.append('password', password);
-  const response = await fetch('/api/open', { method: 'POST', body: form });
-
-  if (response.status === 401) {
-    // Encrypted, and the password we sent (if any) did not open it.
-    const { detail } = await response.json();
-    status('準備完了');
-    const values = await formDialog({
-      title: 'パスワードが必要です',
-      intro: `${file.name} は保護されています。開くためのパスワードを入力してください。`,
-      warning: password ? detail : undefined,
-      fields: [{ key: 'password', label: 'パスワード', type: 'password' }],
-      confirmLabel: '開く',
-    });
-    if (values?.password) await openFile(file, values.password, handle);
-    return;
-  }
-  if (!response.ok) {
-    toast(`開けませんでした: ${(await response.json()).detail || response.status}`, 'error');
-    status('準備完了');
-    return;
-  }
-  const data = await response.json();
+async function adopt(data, { handle = null, message = null } = {}) {
+  const previous = model.store.docId;
+  flushEditing();
   state.fileHandle = handle;
   state.toc = data.toc || [];
+  state.pageSelection.clear();
+  state.textLines.clear();
+  state.searchHits = [];
+  state.searchIndex = -1;
+  $('#searchCount').textContent = '';
   model.loadDocument(data);
-  $('#docName').textContent = data.name;
-  // The name is hidden on narrow windows, so keep it reachable.
-  $('#docName').title = data.name;
-  document.title = `${data.name} — PDF Studio`;
   $('#emptyState').classList.add('hidden');
-  await viewer.load(`/api/doc/${data.id}/file`);
-  renderOutline($('#panelOutline'), state.toc, (page) => viewer.scrollToPage(page));
-  renderThumbs($('#panelThumbs'), viewer, viewer.currentPage, (page) => viewer.scrollToPage(page));
+  await viewer.load(`${docUrl('/file')}?t=${Date.now()}`);
+  state.unsaved = false;
+  afterReload();
   refreshAll();
-  // Opening decrypts into the working copy, so say so rather than let the
-  // reader assume the protection travelled with it.
-  toast(data.wasProtected
-    ? `${data.name} を開きました（保護は外れた状態で編集します。書き出すときは「パスワードで保護して書き出す」を使ってください）`
-    : `${data.name} を開きました`);
+  if (previous && previous !== data.id) {
+    fetch(`/api/doc/${previous}/close`, { method: 'POST' }).catch(() => {});
+  }
+  // Pick up where the reader left off in this file last time.
+  let resumed = '';
+  try {
+    const page = Number(localStorage.getItem(positionKey()) || 0);
+    if (page > 0 && page < model.store.pages.length) {
+      viewer.scrollToPage(page);
+      resumed = `（前回の続き ${page + 1} ページ目から）`;
+    }
+  } catch { /* storage blocked */ }
+  toast(message || `${data.name} を開きました${resumed}`);
 }
 
-$('#fileInput').addEventListener('change', (e) => {
-  if (e.target.files[0]) openFile(e.target.files[0]);
-  e.target.value = '';
-});
+function positionKey() {
+  return `pdfstudio.pos.${model.store.name}.${model.store.pages.length}`;
+}
+
+async function openFile(file, password = '', handle = null) {
+  if (!password && !(await confirmDiscard())) return;
+  const done = busy(`${file.name} を開いています…`);
+  try {
+    await paint();
+    const form = new FormData();
+    form.append('file', file);
+    if (password) form.append('password', password);
+    const response = await fetch('/api/open', { method: 'POST', body: form });
+
+    if (response.status === 401) {
+      // Encrypted, and the password we sent (if any) did not open it.
+      const { detail } = await response.json();
+      done();
+      const values = await formDialog({
+        title: 'パスワードが必要です',
+        intro: `${file.name} は保護されています。開くためのパスワードを入力してください。`,
+        warning: password ? detail : undefined,
+        fields: [{ key: 'password', label: 'パスワード', type: 'password' }],
+        confirmLabel: '開く',
+      });
+      if (values?.password) { state.unsaved = false; await openFile(file, values.password, handle); }
+      return;
+    }
+    if (!response.ok) {
+      toast(`開けませんでした: ${await errorDetail(response)}`, 'error');
+      return;
+    }
+    const data = await response.json();
+    // Opening decrypts into the working copy, so say so rather than let the
+    // reader assume the protection travelled with it.
+    await adopt(data, {
+      handle,
+      message: data.wasProtected
+        ? `${data.name} を開きました（保護を外した状態で編集します。保護を付け直すには「ファイル」→「パスワードを付けて書き出す」）`
+        : null,
+    });
+  } catch (err) {
+    toast(`開けませんでした: ${err.message}`, 'error');
+  } finally {
+    done();
+  }
+}
+
 /** Open through the file picker where possible, so Save can write back to the same file. */
 async function chooseFile() {
   if (!window.showOpenFilePicker) { $('#fileInput').click(); return; }
@@ -105,120 +130,223 @@ async function chooseFile() {
     if (err.name !== 'AbortError') $('#fileInput').click();
   }
 }
-for (const id of ['#btnOpen', '#btnOpen2']) {
-  $(id).addEventListener('click', chooseFile);
+
+async function newBlank() {
+  if (!(await confirmDiscard())) return;
+  const values = await formDialog({
+    title: '白紙から作る',
+    fields: [
+      { key: 'size', label: '用紙', type: 'select', options: { a4p: 'A4 縦', a4l: 'A4 横', b5p: 'B5 縦', letter: 'レター 縦' } },
+    ],
+    confirmLabel: '作る',
+  });
+  if (!values) return;
+  const [width, height] = { a4p: [595, 842], a4l: [842, 595], b5p: [516, 729], letter: [612, 792] }[values.size];
+  const response = await fetch('/api/new', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '無題.pdf', width, height }),
+  });
+  if (!response.ok) { toast('作成できませんでした', 'error'); return; }
+  state.unsaved = false;
+  await adopt(await response.json(), { message: '白紙の文書を作りました。「テキスト追加」やペンで書き込めます' });
+  state.unsaved = true;
+  refreshPanels();
 }
 
-stage.addEventListener('dragover', (e) => { e.preventDefault(); stage.classList.add('dragover'); });
-stage.addEventListener('dragleave', () => stage.classList.remove('dragover'));
-stage.addEventListener('drop', async (e) => {
+async function pdfFromImages(files) {
+  if (!files.length) return;
+  if (!(await confirmDiscard())) return;
+  const done = busy('画像からPDFを作っています…');
+  try {
+    await paint();
+    const form = new FormData();
+    for (const file of files) form.append('files', file);
+    const response = await fetch('/api/from-images', { method: 'POST', body: form });
+    if (!response.ok) { toast(`作成できませんでした: ${await errorDetail(response)}`, 'error'); return; }
+    state.unsaved = false;
+    await adopt(await response.json(), { message: `${files.length} 枚の画像からPDFを作りました` });
+    state.unsaved = true;
+    refreshPanels();
+  } finally {
+    done();
+  }
+}
+
+$('#fileInput').addEventListener('change', (e) => {
+  if (e.target.files[0]) openFile(e.target.files[0]);
+  e.target.value = '';
+});
+$('#imagePdfInput').addEventListener('change', (e) => { pdfFromImages([...e.target.files]); e.target.value = ''; });
+$('#imageInput').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (file) insertImage(await fileToDataUrl(file));
+});
+$('#mergeInput').addEventListener('change', (e) => { ops.mergeFiles([...e.target.files]); e.target.value = ''; });
+$('#xfdfInput').addEventListener('change', (e) => { ops.importXfdf(e.target.files[0]); e.target.value = ''; });
+$('#fdfInput').addEventListener('change', (e) => { ops.importFields(e.target.files[0]); e.target.value = ''; });
+$('#collateInput').addEventListener('change', (e) => { ops.collateFields([...e.target.files]); e.target.value = ''; });
+$('#compareInput').addEventListener('change', (e) => { ops.compareWith(e.target.files[0]); e.target.value = ''; });
+$('#btnOpen2').addEventListener('click', chooseFile);
+$('#btnNew2').addEventListener('click', newBlank);
+$('#btnImages2').addEventListener('click', () => $('#imagePdfInput').click());
+
+// Files can be dropped anywhere on the window. Handling it only over the page
+// area meant a drop on a toolbar made the browser navigate away to the file.
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+let dragDepth = 0;
+window.addEventListener('dragenter', (e) => { if (hasFiles(e)) { dragDepth += 1; document.body.classList.add('dragover'); } });
+window.addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) document.body.classList.remove('dragover');
+});
+window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+window.addEventListener('drop', async (e) => {
+  if (!hasFiles(e)) return;
   e.preventDefault();
-  stage.classList.remove('dragover');
+  dragDepth = 0;
+  document.body.classList.remove('dragover');
+  const files = [...e.dataTransfer.files];
   const item = e.dataTransfer.items?.[0];
   // Must be requested synchronously, before the event finishes.
   const handlePromise = item?.getAsFileSystemHandle ? item.getAsFileSystemHandle().catch(() => null) : null;
-  const file = e.dataTransfer.files[0];
-  if (!file || file.type !== 'application/pdf') return;
-  const handle = handlePromise ? await handlePromise : null;
-  openFile(file, '', handle && handle.kind === 'file' ? handle : null);
+  const isPdf = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+  const pdfs = files.filter(isPdf);
+  const images = files.filter((f) => f.type.startsWith('image/'));
+  if (pdfs.length) {
+    if (hasDoc() && (pdfs.length > 1 || e.shiftKey)) { ops.mergeFiles(pdfs); return; }
+    const handle = handlePromise ? await handlePromise : null;
+    openFile(pdfs[0], '', handle && handle.kind === 'file' ? handle : null);
+  } else if (images.length) {
+    if (hasDoc()) {
+      const view = viewer.viewFromPoint(e.clientX, e.clientY);
+      const at = view ? { view, point: viewer.toPageCoords(view, e) } : null;
+      for (const image of images) await insertImage(await fileToDataUrl(image), { at });
+    } else {
+      pdfFromImages(images);
+    }
+  } else if (files.length) {
+    toast('PDFか画像ファイルをドロップしてください', 'warn');
+  }
 });
 
-// ---------------------------------------------------------------- rendering
+// ================================================================ rendering
 
 function refreshOverlays() {
+  overlaysQueued = false;
+  const editingId = state.editor?.meta?.id || null;
   for (const view of viewer.pageViews) {
-    renderPage(view, model.onPage(view.index), model.store.selection);
+    renderPage(view, model.onPage(view.index), model.store.selection, { editingId, scale: viewer.scale });
   }
+  placeSelectionBar();
 }
 
-// The context bar is rebuilt only when what it is editing changes. Rebuilding
-// it on every value change would replace the control mid-gesture, so dragging
-// the opacity slider would stop after the first pixel.
-let contextSignature = null;
+// Redrawing is coalesced to once a frame. Besides being cheaper during a
+// drag, it keeps the element a pointer event landed on in the document until
+// that event has finished being handled.
+let overlaysQueued = false;
+function scheduleOverlays() {
+  if (overlaysQueued) return;
+  overlaysQueued = true;
+  requestAnimationFrame(() => { if (overlaysQueued) refreshOverlays(); });
+}
+
+function selectedAnnots() {
+  return model.store.selection.map(model.byId).filter(Boolean);
+}
 
 function refreshPanels() {
-  const selection = model.store.selection.map(model.byId).filter(Boolean);
-  const signature = `${tools.tool}|${selection.map((a) => a.id).join(',')}`;
-  if (signature !== contextSignature) {
-    contextSignature = signature;
-    renderContextBar($('#contextbar'), {
-      tool: tools.tool,
-      selection,
-      onChange: (patch, gesture) => applyStylePatch(patch, selection, gesture),
-      onCommit: () => model.endMerge(),
-      onExtra: (patch) => {
-        if (selection.length) model.updateAnnots(selection.map((a) => a.id), patch);
-      },
-    });
+  const selection = selectedAnnots();
+  ribbon.refresh();
+
+  const right = $('#rightPanel');
+  if (!right.classList.contains('collapsed')) {
+    const active = right.querySelector('.panel.active')?.id;
+    if (active === 'panelProps') {
+      refreshPanel($('#panelProps'), () => renderProps($('#panelProps'), {
+        selection,
+        // One merge token per field, so a run of typing is one undo step.
+        onPatch: (patch, field) => {
+          model.updateAnnots(selection.map((a) => a.id), patch,
+            { merge: field ? `prop:${selection.map((a) => a.id).join()}:${field}` : null });
+          if (field) endMergeWhenIdle();
+        },
+      }));
+    } else if (active === 'panelComments') {
+      refreshPanel($('#panelComments'), () => renderComments($('#panelComments'), {
+        annots: model.store.annots,
+        selection,
+        filters: state.filters,
+        onFilter: (patch) => { Object.assign(state.filters, patch); refreshPanels(); },
+        onSelect: (annot) => {
+          selectTool('select');
+          model.select([annot.id]);
+          viewer.scrollToPage(annot.page, annot.rect[1]);
+        },
+        onPatch: (id, patch) => model.updateAnnots([id], patch),
+        onReply: (id, text) => {
+          const annot = model.byId(id);
+          if (!annot) return;
+          model.updateAnnots([id], {
+            replies: [...(annot.replies || []), {
+              id: model.uid(), author: getPref('author') || '', contents: text,
+              created: new Date().toISOString(),
+            }],
+          });
+          toast('返信を追加しました');
+        },
+        onBulk: (action, items) => {
+          if (action !== 'select') return;
+          selectTool('select');
+          model.select(items.map((a) => a.id));
+          if (items.length) viewer.scrollToPage(items[0].page, items[0].rect[1]);
+        },
+      }));
+    } else if (active === 'panelTakeoff') {
+      refreshPanel($('#panelTakeoff'), () => renderTakeoff($('#panelTakeoff'), {
+        rows: measure.summarise(model.store.annots),
+        scale: measure.getScale(),
+        calibrated: measure.isCalibrated(),
+        unitLabels: measure.UNIT_LABELS,
+        subject: state.takeoffSubject,
+        onCalibrate: startCalibration,
+        onUnit: (unit) => { measure.setScale({ unit }); refreshPanels(); },
+        onSubject: (value) => { state.takeoffSubject = value; tools.subject = value; },
+        onExportCsv: () => exportVia('/takeoff', { csv: true }, { label: '書き出し', fallback: 'takeoff.csv' }),
+        onLegend: placeLegend,
+      }));
+    } else if (active === 'panelSettings') {
+      refreshPanel($('#panelSettings'), () => renderSettings($('#panelSettings'), {
+        getPref, setPref,
+        onChange: (what) => { if (what === 'reset-defaults') location.reload(); },
+      }));
+    }
   }
-  keepingFocus($('#panelProps'), () => renderProps($('#panelProps'), {
-    selection,
-    // One merge token per field, so a run of typing is one undo step but
-    // switching fields starts a new one.
-    onPatch: (patch, field) => {
-      model.updateAnnots(
-        selection.map((a) => a.id), patch,
-        { merge: field ? `prop:${selection.map((a) => a.id).join()}:${field}` : null },
-      );
-      if (field) endMergeWhenIdle();
-    },
-  }));
-  keepingFocus($('#panelComments'), () => renderComments($('#panelComments'), {
-    annots: model.store.annots,
-    selection,
-    filters: state.filters,
-    onFilter: (patch) => { Object.assign(state.filters, patch); refreshPanels(); },
-    onSelect: (annot) => {
-      model.select([annot.id]);
-      viewer.scrollToPage(annot.page, annot.rect[1]);
-    },
-    onPatch: (id, patch) => { model.updateAnnots([id], patch); scheduleAutosave(); },
-    onReply: (id, text) => {
-      const annot = model.byId(id);
-      if (!annot) return;
-      model.updateAnnots([id], {
-        replies: [...(annot.replies || []), {
-          id: model.uid(),
-          author: getPref('author') || '',
-          contents: text,
-          created: new Date().toISOString(),
-        }],
-      });
-      scheduleAutosave();
-      toast('返信を追加しました');
-    },
-    onBulk: (action, items) => {
-      if (action === 'select') {
-        model.select(items.map((a) => a.id));
-        if (items.length) viewer.scrollToPage(items[0].page, items[0].rect[1]);
-      }
-    },
-  }));
-  keepingFocus($('#panelTakeoff'), () => renderTakeoff($('#panelTakeoff'), {
-    rows: measure.summarise(model.store.annots),
-    scale: measure.getScale(),
-    calibrated: measure.isCalibrated(),
-    unitLabels: measure.UNIT_LABELS,
-    subject: state.takeoffSubject,
-    onCalibrate: startCalibration,
-    onUnit: (unit) => { measure.setScale({ unit }); refreshPanels(); },
-    onSubject: (value) => { state.takeoffSubject = value; tools.subject = value; },
-    onExportCsv: exportTakeoff,
-    onLegend: placeLegend,
-  }));
-  keepingFocus($('#panelSettings'), () => renderSettings($('#panelSettings'), {
-    getPref, setPref,
-    onChange: () => { document.body.dataset.theme = getPref('theme'); },
-  }));
+
   $('#btnUndo').disabled = !model.history.canUndo;
   $('#btnRedo').disabled = !model.history.canRedo;
-  $('#btnUndo').title = model.history.canUndo
-    ? '元に戻す (Ctrl+Z)'
-    : 'この操作は元に戻せません。ページ操作や墨消しなどの前には、自動でスナップショットが保存されます';
-  $('#statusSave').textContent = model.store.dirty ? '未保存の変更あり' : '保存済み';
-  if (model.store.docId) {
-    const selected = selection.length ? ` · ${selection.length} 件を選択` : '';
-    status(`${model.store.pages.length} ページ · 注釈 ${model.store.annots.length} 件${selected}`);
+  $('#qSave').disabled = !hasDoc();
+  $('#qPrint').disabled = !hasDoc();
+  $('#btnUndo').title = model.history.nextIsStructural
+    ? '直前のページ操作を元に戻す (Ctrl+Z)' : '元に戻す (Ctrl+Z)';
+
+  const name = hasDoc() ? (state.fileHandle?.name || model.store.name) : '文書が開かれていません';
+  $('#docName').textContent = name;
+  $('#docName').title = name;
+  const saveState = $('#saveState');
+  saveState.textContent = !hasDoc() ? '' : state.unsaved ? '● 未保存の変更があります' : '保存済み';
+  saveState.classList.toggle('dirty', state.unsaved);
+  document.title = hasDoc() ? `${state.unsaved ? '● ' : ''}${name} — PDF Studio` : 'PDF Studio';
+
+  if (hasDoc()) {
+    const selected = selection.length ? ` ／ ${selection.length} 件を選択中` : '';
+    const pages = state.pageSelection.size > 1 ? ` ／ ${state.pageSelection.size} ページを選択中` : '';
+    status(`${model.store.pages.length} ページ ／ 書き込み ${model.store.annots.length} 件${selected}${pages}`);
+  }
+  $('#pageTotal').textContent = `/ ${model.store.pages.length}`;
+  if (document.activeElement !== $('#pageInput')) {
+    $('#pageInput').value = hasDoc() ? String(viewer.currentPage + 1) : '';
   }
 }
 
@@ -227,87 +355,979 @@ function refreshAll() {
   refreshPanels();
 }
 
-// A burst of typing is one undo step; a pause starts the next. Ending it on
-// blur would not work, because re-rendering the panel blurs the field on every
-// keystroke — each character would become its own step.
+function afterReload() {
+  drawSearchHits();
+  renderThumbs($('#panelThumbs'), viewer, { current: viewer.currentPage, selected: state.pageSelection }, thumbHandlers);
+  renderOutlinePanel();
+  syncZoomControls();
+}
+
+hooks.refreshAll = refreshAll;
+hooks.afterReload = afterReload;
+hooks.flushEditing = () => flushEditing();
+
+// A burst of typing is one undo step; a pause starts the next.
 let mergeIdleTimer;
 function endMergeWhenIdle(delay = 1200) {
   clearTimeout(mergeIdleTimer);
   mergeIdleTimer = setTimeout(() => model.endMerge(), delay);
 }
 
-function applyStylePatch(patch, selection, gesture) {
+model.subscribe((reason) => {
+  if (!['selection', 'document', 'saved', 'derived'].includes(reason)) state.unsaved = true;
+  if (state.editor && !state.editor.meta.isLine) {
+    const annot = model.byId(state.editor.meta.id);
+    if (annot) state.editor.applyStyle(annot); else { state.editor.discard(); state.editor = null; }
+  }
+  if (reason === 'selection') {
+    // Clicking another annotation ends the edit of the open text box.
+    if (state.editor && !state.editor.meta.isLine && !model.store.selection.includes(state.editor.meta.id)) flushEditing();
+  }
+  scheduleOverlays();
+  refreshPanels();
+});
+
+viewer.addEventListener('zoom', () => {
+  state.editor?.setScale(viewer.scale);
+  if (noteEditor) closeNoteEditor();
+  refreshOverlays();
+  syncZoomControls();
+});
+viewer.addEventListener('page', (e) => {
+  if (document.activeElement !== $('#pageInput')) $('#pageInput').value = String(e.detail.page + 1);
+  updateThumbs($('#panelThumbs'), { current: e.detail.page, selected: state.pageSelection });
+  scrollThumbIntoView($('#panelThumbs'), e.detail.page);
+  ribbon.refresh();
+  if (tools.tool === 'edittext') loadTextLines(e.detail.page);
+  try { if (hasDoc()) localStorage.setItem(positionKey(), String(e.detail.page)); } catch { /* storage blocked */ }
+});
+stage.addEventListener('scroll', () => { hideSelectionBar(); scheduleBar(); }, { passive: true });
+
+// ================================================================ text boxes
+
+function pageWidthOf(annot) {
+  return model.store.pages[annot.page]?.width || viewer.pageViews[annot.page]?.width || 595;
+}
+
+function startTextEdit(id, { isNew = false, point = null } = {}) {
+  if (state.editor?.meta.id === id) { state.editor.focus({ point }); return; }
+  flushEditing();
+  const annot = model.byId(id);
+  if (!annot) return;
+  if (annot.flags?.locked || annot.flags?.readOnly) { toast('この書き込みはロックされています', 'warn'); return; }
+  const view = viewer.pageViews[annot.page];
+  if (!view) return;
+  if (annot.type === 'note') { openNoteEditor(annot, view, isNew); return; }
+  if (annot.type !== 'freetext') return;
+
+  if (!model.store.selection.includes(id) || model.store.selection.length !== 1) model.select([id]);
+  hideSelectionBar();
+  const editor = new TextEditor({
+    wrap: view.wrap, annot, scale: viewer.scale, pageWidth: pageWidthOf(annot),
+    placeholder: isNew ? 'ここに入力' : '',
+    onCommit: (text, size, options) => commitText(id, isNew, text, size, options),
+    onGrab: (event) => {
+      // The frame was grabbed: finish typing and drag the box instead.
+      editor.commit({ keepSelected: true });
+      if (!model.byId(id)) return;
+      const page = viewer.pageViews[annot.page];
+      tools.beginMove(page, viewer.toPageCoords(page, event), event);
+    },
+  });
+  editor.meta = { id, isNew };
+  state.editor = editor;
+  refreshOverlays();
+  editor.focus({ point, selectAll: false });
+  ensureFontLoaded(annot.style?.font);
+  ribbon.refresh();
+}
+
+function commitText(id, isNew, text, size, { keepSelected = false } = {}) {
+  state.editor = null;
+  const annot = model.byId(id);
+  if (!annot) { refreshAll(); return; }
+  if (!text) {
+    // An empty text box is nothing: drop it rather than leave an invisible
+    // object on the page.
+    model.removeAnnots([id]);
+    refreshAll();
+    return;
+  }
+  const [x0, y0, x1, y1] = annot.rect;
+  const rect = [
+    x0, y0,
+    annot.autoWidth ? x0 + size.width : x1,
+    y0 + (annot.autoHeight === false ? Math.max(size.height, y1 - y0) : size.height),
+  ];
+  const patch = { text, contents: text, rect };
+  const same = text === annot.text && rect.every((v, i) => Math.abs(v - annot.rect[i]) < 0.02);
+  if (!same) model.updateAnnots([id], patch);
+  if (!keepSelected && model.store.selection.includes(id)) model.select([]);
+  refreshAll();
+}
+
+function flushEditing() {
+  if (state.editor) state.editor.commit({ keepSelected: true });
+  if (noteEditor) closeNoteEditor();
+}
+
+/** Re-measure text boxes after something that changes how much room they need. */
+function refitText(ids, merge = null) {
+  for (const id of ids) {
+    const annot = model.byId(id);
+    if (!annot || annot.type !== 'freetext' || state.editor?.meta.id === id || !annot.text) continue;
+    const rect = fitRect(annot, pageWidthOf(annot));
+    if (rect.some((v, i) => Math.abs(v - annot.rect[i]) > 0.02)) {
+      model.updateAnnots([id], { rect }, { merge });
+    }
+  }
+}
+
+// A box measured before its font had loaded was measured in a fallback face.
+document.fonts?.addEventListener?.('loadingdone', () => {
+  for (const annot of model.store.annots) {
+    if (annot.type !== 'freetext' || state.editor?.meta.id === annot.id) continue;
+    const rect = fitRect(annot, pageWidthOf(annot));
+    if (rect.some((v, i) => Math.abs(v - annot.rect[i]) > 0.02)) model.silentUpdate(annot.id, { rect });
+  }
+});
+
+// A press outside the open text box finishes it. This runs in the capture
+// phase so the tool handler sees the document as it is after the commit.
+stage.addEventListener('pointerdown', (e) => {
+  if (e.target.closest?.('.ft-host, .note-editor')) return;
+  if (!state.editor && !noteEditor) return;
+  const typing = !!state.editor;
+  flushEditing();
+  // With the text tool, this press only closes the box; it does not also
+  // start a new one where the user clicked away.
+  if (typing && tools.tool === 'edittext') tools.swallowNext = true;
+  if (typing && isTextTool(tools.tool) && !e.target.closest?.('.annot.is-text')) tools.swallowNext = true;
+}, true);
+
+let noteEditor = null;
+
+function openNoteEditor(annot, view, isNew) {
+  closeNoteEditor();
+  const scale = viewer.scale;
+  const box = document.createElement('textarea');
+  box.className = 'note-editor';
+  box.placeholder = '付箋の内容を入力（枠の外をクリックで確定）';
+  box.value = annot.contents || '';
+  const left = Math.min(annot.rect[2] * scale + 6, Math.max(0, view.width * scale - 240));
+  box.style.left = `${left}px`;
+  box.style.top = `${annot.rect[1] * scale}px`;
+  view.wrap.append(box);
+  noteEditor = { box, id: annot.id, isNew };
+  box.focus();
+  box.addEventListener('keydown', (event) => {
+    if (!isComposing(event) && (event.key === 'Escape' || (event.key === 'Enter' && (event.ctrlKey || event.metaKey)))) {
+      event.preventDefault();
+      closeNoteEditor();
+    }
+    event.stopPropagation();
+  });
+  for (const type of ['pointerdown', 'pointerup', 'dblclick', 'contextmenu', 'paste', 'copy', 'cut', 'keyup']) {
+    box.addEventListener(type, (event) => event.stopPropagation());
+  }
+  if (!model.store.selection.includes(annot.id)) model.select([annot.id]);
+}
+
+function closeNoteEditor() {
+  if (!noteEditor) return;
+  const { box, id, isNew } = noteEditor;
+  noteEditor = null;
+  const value = box.value.replace(/\s+$/, '');
+  box.remove();
+  const annot = model.byId(id);
+  if (!annot) return;
+  if (isNew && !value) { model.removeAnnots([id]); return; }
+  if (value !== (annot.contents || '')) model.updateAnnots([id], { contents: value });
+}
+
+// ================================================================ tool events
+
+tools.addEventListener('edited', () => refreshPanels());
+tools.addEventListener('tool', () => { hideSelectionBar(); refreshPanels(); });
+tools.addEventListener('edit-text', (e) => startTextEdit(e.detail.id, e.detail));
+tools.addEventListener('tool-done', () => { setToolButton('select'); });
+tools.addEventListener('hint', (e) => toast(e.detail.message));
+tools.addEventListener('refit', (e) => refitText(e.detail.ids));
+tools.addEventListener('resized', (e) => { refitText([e.detail.id]); model.endMerge(); });
+tools.addEventListener('lassoed', (e) => {
+  if (!e.detail.ids.length) { toast('囲んだ中に書き込みがありませんでした', 'warn'); return; }
+  selectTool('select');
+  model.select(e.detail.ids);
+});
+tools.addEventListener('open-props', () => showRightPanel('props'));
+
+/** Hand back to the pointer after a one-shot tool, leaving any text box it opened open. */
+function setToolButton(tool) {
+  tools.setTool(tool);
+}
+
+function selectTool(tool) {
+  if (!hasDoc() && tool !== 'select') { toast('先にPDFを開いてください', 'warn'); return; }
+  flushEditing();
+  clearTextLineHover();
+  tools.setTool(tool);
+  if (tool === 'edittext') {
+    loadTextLines(viewer.currentPage);
+    toast('書き換えたい行をクリックしてください（元のフォントとは見た目が変わることがあります）');
+  }
+  if (MARKUP_TOOLS.has(tool)) toast('文字をなぞって選ぶと引かれます');
+}
+
+// ================================================================ format
+
+function applyStylePatch(patch, gesture) {
+  const selection = selectedAnnots().filter((a) => !a.flags?.locked);
   if (selection.length) {
-    model.updateAnnots(
-      selection.map((a) => a.id), { style: patch },
-      { merge: gesture ? `style:${selection.map((a) => a.id).join()}:${gesture}` : null },
-    );
+    const ids = selection.map((a) => a.id);
+    const merge = gesture ? `style:${ids.join()}:${gesture}` : model.uid();
+    model.updateAnnots(ids, { style: patch }, { merge });
+    if (patch.font || patch.width !== undefined) refitText(ids, merge);
+    if (!gesture) model.endMerge();
+    // What was just chosen is also what the next one should look like.
+    remember(selection[0].type === 'freetext' ? (selection[0].callout ? 'callout' : 'freetext') : toolKeyOf(selection[0]), patch);
   } else {
     remember(tools.tool, patch);
+  }
+  state.editor?.focus();
+  ribbon.refresh();
+}
+
+function toolKeyOf(annot) {
+  if (annot.type === 'ink') return annot.tool === 'mark' ? 'mark' : (annot.tool === 'marker' ? 'marker' : 'pen');
+  if (annot.type === 'line') return (annot.style?.lineEnds || []).some((v) => v && v !== 'none') ? 'arrow' : 'line';
+  return annot.type;
+}
+
+function formatContext() {
+  return {
+    tool: tools.tool,
+    selection: selectedAnnots(),
+    onChange: applyStylePatch,
+    onCommit: () => model.endMerge(),
+    onExtra: (patch) => {
+      const ids = model.store.selection;
+      if (ids.length) model.updateAnnots(ids, patch);
+    },
+    markKind: tools.markKind,
+    onMarkKind: (kind) => { tools.markKind = kind; ribbon.refresh(); },
+  };
+}
+
+function fontGroup() {
+  const group = renderFontGroup(formatContext());
+  if (group) return group;
+  return h('div', { class: 'rhint', text: '「テキスト追加」を選ぶか、ページ上の文字をクリックすると、ここでフォント・サイズ・色を変えられます。' });
+}
+
+function styleGroup() {
+  const group = renderStyleGroup(formatContext());
+  if (group) return group;
+  const context = formatContext();
+  if (renderFontGroup(context)) return null;
+  return h('div', { class: 'rhint', text: '図形・ペン・マーカーを選ぶか、ページ上の書き込みを選ぶと、ここで色や太さを変えられます。' });
+}
+
+// ================================================================ saving
+
+/**
+ * Save to a real file on disk: the opened file, or one the person picks.
+ * Browsers without the File System Access API fall back to a download.
+ */
+async function saveToDisk({ saveAs = false } = {}) {
+  if (!hasDoc()) return false;
+  flushEditing();
+  // The file picker must open from the click itself; ask for it before the
+  // slow part, or the browser refuses it as "not a user gesture".
+  let handle = saveAs ? null : state.fileHandle;
+  try {
+    if (handle && handle.queryPermission && await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+      if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') handle = null;
+    }
+    if (!handle && window.showSaveFilePicker) {
+      const base = (state.fileHandle?.name || model.store.name || 'document.pdf').replace(/\.pdf$/i, '');
+      handle = await window.showSaveFilePicker({
+        suggestedName: `${base}${saveAs ? '' : ''}.pdf`,
+        types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+      });
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') return false;
+    handle = null;
+  }
+
+  const done = busy('保存しています…');
+  try {
+    await paint();
+    const { blob, name } = await finishedPdf();
+    if (handle) {
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      state.fileHandle = handle;
+      model.store.name = handle.name;
+      toast(`${handle.name} に保存しました`);
+    } else {
+      downloadBlob(blob, name);
+      toast(`${name} をダウンロードフォルダに保存しました`);
+    }
+    state.unsaved = false;
+    model.markClean();
+    return true;
+  } catch (err) {
+    toast(`保存に失敗しました: ${err.message}${/NoModificationAllowed|locked|InvalidState/i.test(String(err.name)) ? '（ファイルが他のアプリで開かれていないか確認してください）' : ''}`, 'error');
+    return false;
+  } finally {
+    done();
     refreshPanels();
   }
 }
 
-model.subscribe((reason) => {
-  if (reason === 'selection') { refreshOverlays(); refreshPanels(); return; }
-  refreshAll();
+async function downloadCopy() {
+  if (!hasDoc()) return;
+  const done = busy('書き出しています…');
+  try {
+    await paint();
+    const { blob, name } = await finishedPdf();
+    downloadBlob(blob, name);
+    toast(`${name} をダウンロードフォルダに書き出しました`);
+  } catch (err) {
+    toast(`書き出しに失敗しました: ${err.message}`, 'error');
+  } finally {
+    done();
+  }
+}
+
+let printFrame = null;
+async function printDocument() {
+  if (!hasDoc()) return;
+  const done = busy('印刷の準備をしています…');
+  try {
+    await paint();
+    const { blob } = await finishedPdf();
+    const url = URL.createObjectURL(blob);
+    printFrame?.remove();
+    printFrame = document.createElement('iframe');
+    printFrame.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0;';
+    printFrame.src = url;
+    printFrame.addEventListener('load', () => {
+      setTimeout(() => {
+        try {
+          printFrame.contentWindow.focus();
+          printFrame.contentWindow.print();
+        } catch {
+          // Some browsers will not print a PDF from a frame: open it instead.
+          window.open(url, '_blank');
+          toast('新しいタブで開きました。そこから印刷してください');
+        }
+      }, 400);
+    });
+    document.body.append(printFrame);
+    setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
+  } catch (err) {
+    toast(`印刷の準備に失敗しました: ${err.message}`, 'error');
+  } finally {
+    done();
+  }
+}
+
+window.addEventListener('beforeunload', (e) => {
+  if (state.unsaved) { e.preventDefault(); e.returnValue = ''; }
 });
 
-viewer.addEventListener('zoom', refreshOverlays);
-viewer.addEventListener('page', (e) => {
-  $('#statusPage').textContent = `${e.detail.page + 1} / ${viewer.pageViews.length}`;
-  for (const [index, node] of $('#panelThumbs').querySelectorAll('.thumb').entries()) {
-    node.classList.toggle('current', index === e.detail.page);
+// ================================================================ undo / redo
+
+async function undo() {
+  flushEditing();
+  const outcome = model.undo();
+  if (outcome !== 'structural') return;
+  const done = busy('元に戻しています…');
+  try {
+    await paint();
+    const response = await post('/undo', {});
+    if (!response.ok) { toast(`元に戻せませんでした: ${await errorDetail(response)}`, 'error'); return; }
+    await reloadFrom(await response.json());
+    state.unsaved = true;
+    state.pageSelection.clear();
+    refreshAll();
+    toast('直前の操作を元に戻しました');
+  } finally {
+    done();
+  }
+}
+
+function redo() {
+  flushEditing();
+  model.redo();
+}
+
+$('#btnUndo').addEventListener('click', undo);
+$('#btnRedo').addEventListener('click', redo);
+$('#qSave').addEventListener('click', () => saveToDisk());
+$('#qPrint').addEventListener('click', printDocument);
+
+// ================================================================ clipboard
+
+let clip = [];
+let pasteCount = 0;
+
+function copySelection() {
+  const annots = selectedAnnots();
+  if (!annots.length) return false;
+  clip = annots.map((a) => structuredClone(a));
+  pasteCount = 0;
+  const text = annots.map((a) => a.text || a.contents || '').filter(Boolean).join('\n');
+  if (text) navigator.clipboard?.writeText(text).catch(() => {});
+  toast(`${annots.length} 件をコピーしました`);
+  return true;
+}
+
+function deleteSelection() {
+  const ids = selectedAnnots().filter((a) => !a.flags?.locked).map((a) => a.id);
+  if (!ids.length) {
+    if (model.store.selection.length) toast('ロックされているため削除できません', 'warn');
+    return;
+  }
+  flushEditing();
+  model.removeAnnots(ids);
+}
+
+function cutSelection() {
+  if (copySelection()) deleteSelection();
+}
+
+function pasteAnnots(source = clip, { offset = true, page = viewer.currentPage } = {}) {
+  if (!source.length || !hasDoc()) return false;
+  pasteCount += 1;
+  const samePage = source.every((a) => a.page === page);
+  const shift = offset && samePage ? 12 * pasteCount : 0;
+  const size = model.store.pages[page];
+  const items = source.map((a) => {
+    const copy = structuredClone(a);
+    delete copy.id; delete copy.xref;
+    copy.replies = [];
+    copy.page = page;
+    Object.assign(copy, translated(copy, shift, shift));
+    // Keep a pasted item on the paper when pages differ in size.
+    const over = Math.max(0, copy.rect[2] - size.width + 4);
+    const under = Math.max(0, copy.rect[3] - size.height + 4);
+    if (over || under) Object.assign(copy, translated(copy, -over, -under));
+    return copy;
+  });
+  selectTool('select');
+  model.addAnnots(items);
+  return true;
+}
+
+function duplicateSelection() {
+  const annots = selectedAnnots();
+  if (!annots.length) return;
+  pasteCount = 0;
+  // A duplicate stays on the page of the original, wherever the view is.
+  pasteAnnots(annots.map((a) => structuredClone(a)), { page: annots[0].page });
+}
+
+document.addEventListener('paste', async (e) => {
+  if (!hasDoc()) return;
+  const target = e.target;
+  if (target.closest?.('input, textarea, [contenteditable]')) return;
+  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+  if (files.length) {
+    e.preventDefault();
+    for (const file of files) await insertImage(await fileToDataUrl(file));
+    return;
+  }
+  if (clip.length) { e.preventDefault(); pasteAnnots(); return; }
+  const text = e.clipboardData?.getData('text/plain');
+  if (text && text.trim()) {
+    e.preventDefault();
+    addTextBox(text.replace(/\r\n?/g, '\n').trim());
   }
 });
 
-tools.addEventListener('edited', () => { refreshAll(); scheduleAutosave(); });
-tools.addEventListener('tool', () => refreshPanels());
+// ================================================================ inserting
 
-// ---------------------------------------------------------------- toolbar
-
-for (const button of document.querySelectorAll('.tool')) {
-  button.addEventListener('click', () => selectTool(button.dataset.tool));
+/** The middle of what is on screen, in the coordinates of the page in view. */
+function visibleCentre() {
+  const view = viewer.pageViews[viewer.currentPage] || viewer.pageViews[0];
+  const box = view.wrap.getBoundingClientRect();
+  const frame = stage.getBoundingClientRect();
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  let x = clamp(((frame.left + frame.right) / 2 - box.left) / viewer.scale, 20, view.width - 20);
+  let y = clamp(((frame.top + frame.bottom) / 2 - box.top) / viewer.scale, 20, view.height - 20);
+  // Several things inserted in a row should not land exactly on top of each
+  // other, where the earlier ones would be hidden.
+  const key = `${view.index}:${Math.round(x)}:${Math.round(y)}`;
+  if (lastCentre.key === key) lastCentre.count += 1; else { lastCentre.key = key; lastCentre.count = 0; }
+  x = clamp(x + lastCentre.count * 16, 20, view.width - 20);
+  y = clamp(y + lastCentre.count * 16, 20, view.height - 20);
+  return { view, point: { x, y } };
 }
+const lastCentre = { key: '', count: 0 };
 
-function selectTool(tool) {
-  tools.setTool(tool);
-  for (const button of document.querySelectorAll('.tool')) {
-    button.classList.toggle('active', button.dataset.tool === tool);
+async function insertImage(source, { at = null, points = null } = {}) {
+  if (!hasDoc()) { toast('先にPDFを開いてください', 'warn'); return; }
+  let picture;
+  try {
+    picture = source.image ? source : await normaliseImage(source);
+  } catch (err) {
+    toast(err.message, 'error');
+    return;
   }
+  const { view, point } = at || visibleCentre();
+  let width; let height;
+  if (points) {
+    [width, height] = points;
+  } else {
+    // 96 px per inch is how a screen image is "meant" to be sized; never let
+    // it take more than half the page until the user asks for that.
+    width = Math.min(picture.width * 0.75, view.width * 0.5);
+    height = width * (picture.height / picture.width);
+    if (height > view.height * 0.5) { height = view.height * 0.5; width = height * (picture.width / picture.height); }
+  }
+  const x = Math.max(2, Math.min(point.x - width / 2, view.width - width - 2));
+  const y = Math.max(2, Math.min(point.y - height / 2, view.height - height - 2));
+  selectTool('select');
+  model.addAnnots([{
+    type: 'image', page: view.index, rect: [x, y, x + width, y + height], image: picture.image,
+    style: { opacity: 1 }, author: getPref('author') || '', flags: FLAGS(),
+  }]);
+  toast('画像を置きました。ドラッグで移動、角のハンドルで大きさを変えられます');
 }
-selectTool('select');
 
-/**
- * Keep the zoom control showing the real zoom.
- *
- * The presets do not cover every level the +/- buttons and the fit modes
- * produce, and assigning an unlisted value to a <select> blanks it out. So an
- * entry for the current level is kept alongside the presets.
- */
-function syncZoomSelect() {
+async function insertSignature() {
+  const result = await signatureDialog({ defaultName: getPref('author') || '' });
+  if (!result) return;
+  const height = 42;
+  await insertImage(result, { points: [Math.min(260, height * (result.width / result.height)), height] });
+}
+
+async function insertHanko() {
+  const result = await hankoDialog({ defaultName: getPref('author') || '' });
+  if (result) await insertImage(result, { points: result.points });
+}
+
+function addTextBox(text, { at = null, style = null, edit = false } = {}) {
+  if (!hasDoc()) { toast('先にPDFを開いてください', 'warn'); return null; }
+  const { view, point } = at || visibleCentre();
+  const base = style || styleFor('freetext');
+  const size = base.font?.size || 12;
+  const x = Math.max(2, point.x - (at ? 0 : 60));
+  const y = Math.max(2, point.y - (size * LINE_HEIGHT) / 2 - 2);
+  selectTool('select');
+  const [created] = model.addAnnots([{
+    type: 'freetext', page: view.index, rect: [x, y, x + size + 6, y + size * LINE_HEIGHT + 4],
+    text, contents: text, autoWidth: true, style: base,
+    author: getPref('author') || '', flags: FLAGS(),
+  }]);
+  if (edit) startTextEdit(created.id, { isNew: true });
+  else ensureFontLoaded(base.font, text).then(() => refitText([created.id]));
+  return created;
+}
+
+async function insertDate() {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const era = new Intl.DateTimeFormat('ja-JP-u-ca-japanese', { era: 'long', year: 'numeric', month: 'long', day: 'numeric' }).format(now);
+  const options = {
+    a: `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`,
+    b: `${now.getFullYear()}/${pad(now.getMonth() + 1)}/${pad(now.getDate())}`,
+    c: era,
+    d: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+  };
+  const values = await formDialog({
+    title: '今日の日付を入れる',
+    fields: [{ key: 'format', label: '書き方', type: 'select', options }],
+    confirmLabel: '入れる',
+  });
+  if (values) addTextBox(options[values.format]);
+}
+
+// ================================================================ edit body text
+
+async function loadTextLines(page) {
+  if (state.textLines.has(page) || !hasDoc()) return state.textLines.get(page) || [];
+  state.textLines.set(page, []);
+  try {
+    const response = await fetch(docUrl(`/text/${page}`));
+    if (response.ok) state.textLines.set(page, (await response.json()).lines || []);
+  } catch { /* leave it empty */ }
+  return state.textLines.get(page);
+}
+
+function lineAt(view, point) {
+  const lines = state.textLines.get(view.index) || [];
+  return lines.find((l) => point.x >= l.rect[0] - 2 && point.x <= l.rect[2] + 2
+    && point.y >= l.rect[1] - 1 && point.y <= l.rect[3] + 1) || null;
+}
+
+let hoverLine = null;
+function clearTextLineHover() {
+  hoverLine?.remove();
+  hoverLine = null;
+}
+
+stage.addEventListener('pointermove', (e) => {
+  if (tools.tool !== 'edittext' || state.editor) return;
+  const view = viewer.viewFromEvent(e);
+  if (!view) { clearTextLineHover(); return; }
+  if (!state.textLines.has(view.index)) { loadTextLines(view.index); return; }
+  const line = lineAt(view, viewer.toPageCoords(view, e));
+  clearTextLineHover();
+  if (!line) return;
+  hoverLine = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  hoverLine.setAttribute('class', 'text-line hover');
+  hoverLine.setAttribute('x', line.rect[0] - 1);
+  hoverLine.setAttribute('y', line.rect[1] - 1);
+  hoverLine.setAttribute('width', line.rect[2] - line.rect[0] + 2);
+  hoverLine.setAttribute('height', line.rect[3] - line.rect[1] + 2);
+  view.draw.append(hoverLine);
+});
+
+tools.addEventListener('text-line', async (e) => {
+  const { view, point } = e.detail;
+  await loadTextLines(view.index);
+  const line = lineAt(view, point);
+  if (!line) { toast('この場所に書き換えられる文字が見つかりません（画像の中の文字は書き換えられません）', 'warn'); return; }
+  clearTextLineHover();
+  const size = line.size;
+  const lineHeight = size * LINE_HEIGHT;
+  const middle = (line.rect[1] + line.rect[3]) / 2;
+  const pseudo = {
+    id: `line-${view.index}`, type: 'freetext', page: view.index, text: line.text, autoWidth: true,
+    rect: [line.rect[0] - 3, middle - lineHeight / 2 - 2, line.rect[2] + 3, middle + lineHeight / 2 + 2],
+    style: { font: { family: line.serif ? 'mincho' : 'gothic', size, color: line.colour, bold: line.bold, align: 'left' } },
+  };
+  const editor = new TextEditor({
+    wrap: view.wrap, annot: pseudo, scale: viewer.scale, pageWidth: view.width,
+    onCommit: async (text) => {
+      state.editor = null;
+      if (text === line.text) return;
+      const result = await structural('/text/replace', {
+        page: view.index, pageRect: line.pageRect, origin: line.origin, text,
+        size: line.size, colour: line.colour, serif: line.serif, bold: line.bold,
+      }, { label: '本文の書き換え' });
+      if (result) toast(text ? '本文を書き換えました（Ctrl+Z で戻せます）' : '行を削除しました（Ctrl+Z で戻せます）');
+    },
+  });
+  editor.meta = { id: pseudo.id, isNew: false, isLine: true };
+  state.editor = editor;
+  editor.focus({ point: { x: e.detail.event.clientX, y: e.detail.event.clientY } });
+});
+
+// ================================================================ floating bar
+
+const bar = $('#selectionBar');
+bar.addEventListener('mousedown', (e) => e.preventDefault());
+let barTimer;
+
+function hideSelectionBar() {
+  bar.hidden = true;
+}
+
+function barButton(icon, label, run, { text = false } = {}) {
+  const button = document.createElement('button');
+  button.className = `rbtn${text ? '' : ' iconly'}`;
+  button.title = label;
+  button.innerHTML = iconSvg(icon, 17) + (text ? `<span class="lbl">${label}</span>` : '');
+  button.addEventListener('click', (e) => { e.stopPropagation(); run(); });
+  return button;
+}
+
+function showBarAt(x, y, buttons) {
+  bar.textContent = '';
+  bar.append(...buttons.filter(Boolean));
+  bar.hidden = false;
+  const width = bar.offsetWidth;
+  const left = Math.max(6, Math.min(x - width / 2, window.innerWidth - width - 6));
+  const top = y - bar.offsetHeight - 8;
+  bar.style.left = `${left}px`;
+  bar.style.top = `${top < 150 ? y + 26 : top}px`;
+}
+
+function placeSelectionBar() {
+  if (state.editor || noteEditor || tools.pending || tools.tool !== 'select') { hideSelectionBar(); return; }
+  const selection = selectedAnnots();
+  if (!selection.length) {
+    if (!textSelectionActive()) hideSelectionBar();
+    return;
+  }
+  const page = selection[0].page;
+  const view = viewer.pageViews[page];
+  if (!view || selection.some((a) => a.page !== page)) { hideSelectionBar(); return; }
+  const box = view.wrap.getBoundingClientRect();
+  const frame = stage.getBoundingClientRect();
+  const x0 = Math.min(...selection.map((a) => a.rect[0]));
+  const x1 = Math.max(...selection.map((a) => a.rect[2]));
+  const y0 = Math.min(...selection.map((a) => a.rect[1]));
+  const cx = box.left + ((x0 + x1) / 2) * viewer.scale;
+  const cy = box.top + y0 * viewer.scale;
+  if (cy < frame.top - 10 || cy > frame.bottom || cx < frame.left || cx > frame.right) { hideSelectionBar(); return; }
+  const single = selection.length === 1 ? selection[0] : null;
+  const sep = () => { const s = document.createElement('span'); s.className = 'rsep'; return s; };
+  showBarAt(cx, cy, [
+    single && (single.type === 'freetext' || single.type === 'note')
+      ? barButton('edittext', '文字を編集', () => startTextEdit(single.id), { text: true }) : null,
+    single && single.type !== 'freetext'
+      ? barButton('comments', 'コメントを付ける', () => showRightPanel('props')) : null,
+    sep(),
+    barButton('duplicate', '複製 (Ctrl+D)', duplicateSelection),
+    barButton('copy', 'コピー (Ctrl+C)', copySelection),
+    barButton('trash', '削除 (Delete)', deleteSelection),
+  ]);
+}
+
+function scheduleBar() {
+  clearTimeout(barTimer);
+  barTimer = setTimeout(() => { if (!textSelectionActive()) placeSelectionBar(); else showTextSelectionBar(); }, 180);
+}
+
+function textSelectionActive() {
+  const selection = document.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+  const anchor = selection.anchorNode?.parentElement;
+  return !!anchor?.closest('.text-layer');
+}
+
+/** Selected page text gets the markup tools right next to it. */
+function showTextSelectionBar() {
+  if (tools.tool !== 'select' || !textSelectionActive() || tools._activePointers.size) { return; }
+  const range = document.getSelection().getRangeAt(0);
+  const rects = [...range.getClientRects()].filter((r) => r.width > 1 && r.height > 1);
+  if (!rects.length) return;
+  const first = rects[0];
+  const mark = (kind) => () => { tools.markupSelection(kind); hideSelectionBar(); };
+  showBarAt(first.left + Math.min(first.width, 240) / 2, first.top, [
+    barButton('highlight', 'マーカー', mark('highlight'), { text: true }),
+    barButton('underline', '下線', mark('underline')),
+    barButton('strikeout', '取り消し線', mark('strikeout')),
+    barButton('squiggly', '波線', mark('squiggly')),
+    (() => { const s = document.createElement('span'); s.className = 'rsep'; return s; })(),
+    barButton('copy', 'コピー (Ctrl+C)', () => {
+      navigator.clipboard?.writeText(document.getSelection().toString()).then(() => toast('コピーしました')).catch(() => document.execCommand('copy'));
+      hideSelectionBar();
+    }),
+    barButton('search', 'この語句を検索', () => {
+      $('#searchInput').value = document.getSelection().toString().trim().slice(0, 80);
+      hideSelectionBar();
+      runSearch();
+    }),
+    barButton('redact', '墨消しを指定', mark('redact')),
+  ]);
+}
+
+document.addEventListener('selectionchange', () => {
+  if (tools.tool !== 'select') return;
+  if (!textSelectionActive()) { if (!selectedAnnots().length) hideSelectionBar(); return; }
+  scheduleBar();
+});
+document.addEventListener('pointerup', () => { if (tools.tool === 'select') scheduleBar(); });
+stage.addEventListener('pointerdown', () => hideSelectionBar());
+
+// ================================================================ context menu
+
+stage.addEventListener('contextmenu', (e) => {
+  if (e.target.closest?.('.ft-host, .note-editor')) return;
+  if (!hasDoc()) return;
+  e.preventDefault();
+  flushEditing();
+  const view = viewer.viewFromEvent(e);
+  const hit = e.target.closest?.('.annot');
+  if (hit && tools.tool !== 'select') selectTool('select');
+  if (hit) {
+    const id = hit.dataset.id;
+    if (!model.store.selection.includes(id)) model.select([id]);
+    const selection = selectedAnnots();
+    const single = selection.length === 1 ? selection[0] : null;
+    const locked = selection.some((a) => a.flags?.locked);
+    openMenuAt(e.clientX, e.clientY, [
+      single && (single.type === 'freetext' || single.type === 'note')
+        ? { label: '文字を編集', icon: 'edittext', action: () => startTextEdit(single.id) } : null,
+      { label: '切り取り', icon: 'cut', key: 'Ctrl+X', disabled: locked, action: cutSelection },
+      { label: 'コピー', icon: 'copy', key: 'Ctrl+C', action: copySelection },
+      { label: '複製', icon: 'duplicate', key: 'Ctrl+D', action: duplicateSelection },
+      { label: '削除', icon: 'trash', key: 'Delete', disabled: locked, danger: true, action: deleteSelection },
+      '-',
+      { label: locked ? 'ロックを解除' : 'ロック（動かせなくする）', icon: 'lock',
+        action: () => model.updateAnnots(selection.map((a) => a.id), { flags: { locked: !locked } }) },
+      { label: 'コメント・プロパティ…', icon: 'comments', action: () => showRightPanel('props') },
+    ]);
+    return;
+  }
+  const at = view ? { view, point: viewer.toPageCoords(view, e) } : null;
+  openMenuAt(e.clientX, e.clientY, [
+    { label: '貼り付け', icon: 'paste', key: 'Ctrl+V', disabled: !clip.length, action: () => pasteAnnots() },
+    '-',
+    { label: 'ここにテキストを追加', icon: 'text', disabled: !at, action: () => addTextBox('', { at, edit: true }) },
+    { label: 'ここに付箋を貼る', icon: 'note', disabled: !at, action: () => {
+      selectTool('note');
+      tools._createNote(at.view, at.point);
+    } },
+    { label: '画像を挿入…', icon: 'image', action: () => $('#imageInput').click() },
+    '-',
+    { label: 'このページの書き込みを全選択', key: 'Ctrl+A', action: selectAllOnPage },
+    { label: `${viewer.currentPage + 1} ページ目を右に回転`, icon: 'rotatecw', action: () => ops.rotatePages(90) },
+    { label: 'ページを画像にする…', icon: 'image', action: ops.exportImages },
+  ]);
+});
+
+function selectAllOnPage() {
+  selectTool('select');
+  model.select(model.onPage(viewer.currentPage).map((a) => a.id));
+}
+
+// ================================================================ side panels
+
+for (const tabs of document.querySelectorAll('.side-tabs')) {
+  tabs.addEventListener('click', (e) => {
+    const close = e.target.closest('.side-close');
+    if (close) { tabs.closest('.side').classList.add('collapsed'); onLayoutChange(); return; }
+    const tab = e.target.closest('.side-tab');
+    if (!tab) return;
+    activateSideTab(tabs.closest('.side'), tab.dataset.panel);
+  });
+}
+
+function activateSideTab(side, name) {
+  for (const other of side.querySelectorAll('.side-tab')) other.classList.toggle('active', other.dataset.panel === name);
+  for (const panel of side.querySelectorAll('.panel')) {
+    panel.classList.toggle('active', panel.id.toLowerCase() === `panel${name}`.toLowerCase());
+  }
+  refreshPanels();
+}
+
+function onLayoutChange() {
+  if (viewer.zoomMode.startsWith('fit')) viewer.setZoom(viewer.zoomMode);
+  refreshPanels();
+}
+
+function showRightPanel(name) {
+  const side = $('#rightPanel');
+  const wasHidden = side.classList.contains('collapsed');
+  side.classList.remove('collapsed');
+  activateSideTab(side, name);
+  if (wasHidden) onLayoutChange();
+}
+
+function toggleSide(id) {
+  $(id).classList.toggle('collapsed');
+  onLayoutChange();
+}
+
+const thumbHandlers = {
+  onClick: (index, e) => {
+    if (e.ctrlKey || e.metaKey) {
+      if (state.pageSelection.has(index)) state.pageSelection.delete(index); else state.pageSelection.add(index);
+      state.pageAnchor = index;
+    } else if (e.shiftKey) {
+      const [from, to] = [Math.min(state.pageAnchor, index), Math.max(state.pageAnchor, index)];
+      state.pageSelection = new Set(Array.from({ length: to - from + 1 }, (_, i) => from + i));
+    } else {
+      state.pageSelection = new Set([index]);
+      state.pageAnchor = index;
+      viewer.scrollToPage(index);
+    }
+    updateThumbs($('#panelThumbs'), { current: viewer.currentPage, selected: state.pageSelection });
+    refreshPanels();
+  },
+  onContext: (index, e) => {
+    if (!state.pageSelection.has(index)) {
+      state.pageSelection = new Set([index]);
+      state.pageAnchor = index;
+      updateThumbs($('#panelThumbs'), { current: viewer.currentPage, selected: state.pageSelection });
+    }
+    const pages = targetPages();
+    const label = describePages(pages);
+    openMenuAt(e.clientX, e.clientY, [
+      { heading: label },
+      { label: '右に90°回転', icon: 'rotatecw', action: () => ops.rotatePages(90) },
+      { label: '左に90°回転', icon: 'rotateccw', action: () => ops.rotatePages(-90) },
+      { label: '複製', icon: 'pagecopy', action: ops.duplicatePages },
+      { label: 'このあとに白紙を挿入', icon: 'pageblank', action: ops.insertBlank },
+      { label: 'このあとに別のPDFを結合…', icon: 'merge', action: ops.pickMerge },
+      '-',
+      { label: '上へ移動', icon: 'moveup', action: () => ops.movePagesBy(-1) },
+      { label: '下へ移動', icon: 'movedown', action: () => ops.movePagesBy(1) },
+      '-',
+      { label: '抜き出して別のPDFにする…', icon: 'pageextract', action: ops.extractPages },
+      { label: '画像にする…', icon: 'image', action: ops.exportImages },
+      '-',
+      { label: '削除', icon: 'pagedelete', danger: true, action: ops.deletePages },
+    ]);
+  },
+  onDragStart: (index) => {
+    if (!state.pageSelection.has(index)) {
+      state.pageSelection = new Set([index]);
+      state.pageAnchor = index;
+      updateThumbs($('#panelThumbs'), { current: viewer.currentPage, selected: state.pageSelection });
+    }
+  },
+  onDrop: (insertAt) => ops.movePages(targetPages(), insertAt),
+};
+
+async function saveOutline(toc) {
+  const response = await post('/outline', { toc });
+  if (!response.ok) { toast(`しおりを保存できませんでした: ${await errorDetail(response)}`, 'error'); return; }
+  state.toc = (await response.json()).toc || [];
+  state.unsaved = true;
+  renderOutlinePanel();
+  refreshPanels();
+}
+
+function renderOutlinePanel() {
+  renderOutline($('#panelOutline'), state.toc, {
+    canEdit: hasDoc(),
+    onGo: (page) => viewer.scrollToPage(page),
+    onAdd: async () => {
+      const page = viewer.currentPage + 1;
+      const values = await formDialog({
+        title: 'しおりを追加',
+        fields: [{ key: 'title', label: '名前', value: `${page} ページ` }],
+        confirmLabel: '追加',
+      });
+      if (!values || !values.title.trim()) return;
+      const toc = [...state.toc.map((row) => [...row]), [1, values.title.trim(), page]];
+      toc.sort((a, b) => a[2] - b[2]);
+      saveOutline(toc);
+    },
+    onRename: (index, e) => {
+      openMenuAt(e.clientX, e.clientY, [
+        { label: '名前を変更…', action: async () => {
+          const values = await formDialog({
+            title: 'しおりの名前を変更',
+            fields: [{ key: 'title', label: '名前', value: state.toc[index][1] }],
+            confirmLabel: '変更',
+          });
+          if (!values || !values.title.trim()) return;
+          const toc = state.toc.map((row) => [...row]);
+          toc[index][1] = values.title.trim();
+          saveOutline(toc);
+        } },
+        { label: '削除', danger: true, action: () => saveOutline(state.toc.filter((_, i) => i !== index).map((row) => [...row])) },
+      ]);
+    },
+  });
+}
+
+// ================================================================ zoom & paging
+
+function syncZoomControls() {
   const select = $('#zoomSelect');
-  if (viewer.zoomMode.startsWith('fit')) {
-    select.value = viewer.zoomMode;
-    return;
-  }
-  const exact = [...select.options].find((o) => Number(o.value) === viewer.scale);
-  if (exact) {
-    select.value = exact.value;
-    return;
-  }
+  $('#zoomSlider').value = String(Math.round(viewer.scale * 100));
+  if (viewer.zoomMode.startsWith('fit')) { select.value = viewer.zoomMode; return; }
+  const exact = [...select.options].find((o) => Math.abs(Number(o.value) - viewer.scale) < 0.001);
+  if (exact) { select.value = exact.value; return; }
+  // The presets do not cover every level, and assigning an unlisted value to
+  // a <select> blanks it out — so keep an entry for the current level.
   let custom = select.querySelector('option[data-custom]');
-  if (!custom) {
-    custom = document.createElement('option');
-    custom.dataset.custom = 'true';
-  }
+  if (!custom) { custom = document.createElement('option'); custom.dataset.custom = 'true'; }
   custom.value = String(viewer.scale);
   custom.textContent = `${Math.round(viewer.scale * 100)}%`;
-  // Slot it among the presets rather than after them, so the list stays in
-  // ascending order and 125% does not appear below 400%.
-  const next = [...select.options].find(
-    (o) => !o.dataset.custom && Number(o.value) > viewer.scale,
-  );
+  const next = [...select.options].find((o) => !o.dataset.custom && Number(o.value) > viewer.scale);
   select.insertBefore(custom, next ?? null);
   select.value = custom.value;
 }
@@ -316,935 +1336,56 @@ for (const button of document.querySelectorAll('[data-zoom]')) {
   button.addEventListener('click', () => viewer.nudgeZoom(button.dataset.zoom === 'in' ? 1 : -1));
 }
 $('#zoomSelect').addEventListener('change', (e) => viewer.setZoom(e.target.value));
-viewer.addEventListener('zoom', syncZoomSelect);
+$('#zoomSlider').addEventListener('input', (e) => viewer.setZoom(String(Number(e.target.value) / 100)));
 
-$('#btnUndo').addEventListener('click', () => model.undo());
-$('#btnRedo').addEventListener('click', () => model.redo());
-
-$('#btnTheme').addEventListener('click', () => {
-  const next = document.body.dataset.theme === 'dark' ? 'light' : 'dark';
-  document.body.dataset.theme = next;
-  setPref('theme', next);
+function goToPage(index) {
+  if (!hasDoc()) return;
+  viewer.scrollToPage(Math.max(0, Math.min(model.store.pages.length - 1, index)));
+}
+$('#btnPagePrev').addEventListener('click', () => goToPage(viewer.currentPage - 1));
+$('#btnPageNext').addEventListener('click', () => goToPage(viewer.currentPage + 1));
+$('#pageInput').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || isComposing(e)) return;
+  const wanted = Number(e.target.value.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)));
+  if (Number.isFinite(wanted) && wanted >= 1) goToPage(Math.round(wanted) - 1);
+  e.target.blur();
 });
-document.body.dataset.theme = getPref('theme') || 'dark';
+$('#pageInput').addEventListener('focus', (e) => e.target.select());
+$('#pageInput').addEventListener('blur', (e) => { e.target.value = hasDoc() ? String(viewer.currentPage + 1) : ''; });
 
-for (const tabs of document.querySelectorAll('.side-tabs')) {
-  tabs.addEventListener('click', (e) => {
-    const tab = e.target.closest('.side-tab');
-    if (!tab) return;
-    const side = tabs.closest('.side');
-    for (const other of tabs.querySelectorAll('.side-tab')) other.classList.toggle('active', other === tab);
-    for (const panel of side.querySelectorAll('.panel')) {
-      panel.classList.toggle('active', panel.id.toLowerCase().endsWith(tab.dataset.panel));
-    }
-  });
-}
-
-// ---------------------------------------------------------------- saving
-
-let autosaveTimer;
-let lastSaveMs = 0;
-
-/**
- * Autosave, paced by how long saving actually takes.
- *
- * Every save rewrites the whole annotation set, so a document with hundreds of
- * marks takes seconds. Saving again 4 seconds later would leave it writing
- * almost continuously, so heavy documents get a longer gap.
- */
-function scheduleAutosave() {
-  clearTimeout(autosaveTimer);
-  const delay = Math.max(4000, Math.min(30000, lastSaveMs * 3));
-  autosaveTimer = setTimeout(() => save({ quiet: true }), delay);
-}
-
-async function save({ quiet = false, force = false } = {}) {
-  if (!model.store.docId || (!model.store.dirty && !force)) return;
-  if (state.saving) {
-    // A save is already in flight. Dropping this one would leave the newest
-    // edits unsaved until something else happened to trigger another.
-    scheduleAutosave();
-    return;
-  }
-  state.saving = true;
-  $('#statusSave').textContent = '保存中…';
-  const started = performance.now();
-  // Snapshot what is being saved: edits made while the request is in flight
-  // must not be marked clean.
-  const savingCount = model.store.annots.length;
-  const payload = JSON.stringify({ annots: model.store.annots });
-  try {
-    const response = await fetch(`/api/doc/${model.store.docId}/annots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: payload,
-    });
-    if (!response.ok) throw new Error(await response.text());
-    const result = await response.json();
-    lastSaveMs = performance.now() - started;
-    if (model.store.annots.length === savingCount) model.markClean();
-    else scheduleAutosave();  // changed mid-save; write again shortly
-    if (!quiet) toast(`保存しました（注釈 ${result.written} 件をPDFに書き込み）`);
-  } catch (err) {
-    toast(`保存に失敗しました: ${err.message}`, 'error');
-  } finally {
-    state.saving = false;
-    refreshPanels();
-  }
-}
-
-/**
- * Save to a real file on disk.
- *
- * save() above only writes the annotations into the in-tab working copy (and
- * runs on a timer). This is the explicit one: it flushes that, then writes the
- * finished PDF to the opened file, or to a file the person picks. Browsers
- * without the File System Access API fall back to a normal download.
- */
-async function saveToDisk({ saveAs = false } = {}) {
-  if (!model.store.docId) return;
-  while (state.saving) await new Promise((resolve) => setTimeout(resolve, 50));
-  clearTimeout(autosaveTimer);
-  await save({ quiet: true, force: true });
-  if (model.store.dirty) return;  // save() already reported why it failed
-
-  $('#statusSave').textContent = '保存中…';
-  try {
-    const response = await fetch(`/api/doc/${model.store.docId}/download`);
-    if (!response.ok) throw new Error(await response.text());
-    const blob = await response.blob();
-    const disposition = response.headers.get('Content-Disposition') || '';
-    const match = /filename\*=UTF-8''([^;]+)/.exec(disposition);
-    const name = match ? decodeURIComponent(match[1]) : 'document.pdf';
-
-    let handle = saveAs ? null : state.fileHandle;
-    if (handle && handle.queryPermission && await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') {
-      if (await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') handle = null;
-    }
-    if (!handle && window.showSaveFilePicker) {
-      handle = await window.showSaveFilePicker({
-        suggestedName: state.fileHandle?.name && !saveAs ? state.fileHandle.name : name,
-        types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
-      });
-    }
-    if (handle) {
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      state.fileHandle = handle;
-      $('#docName').textContent = handle.name;
-      document.title = `${handle.name} — PDF Studio`;
-      toast(`${handle.name} に保存しました`);
-    } else {
-      downloadResponse(blob, response, name);  // no File System Access API: plain download
-    }
-    model.markClean();
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      status('準備完了');
-    } else {
-      toast(`保存に失敗しました: ${err.message}`, 'error');
-    }
-  } finally {
-    refreshPanels();
-  }
-}
-
-$('#btnSave').addEventListener('click', () => saveToDisk());
-$('#btnSaveAs').addEventListener('click', () => saveToDisk({ saveAs: true }));
-$('#btnDownload').addEventListener('click', async () => {
-  if (!model.store.docId) return;
-  await save({ quiet: true });
-  window.pdfStudioDownload(model.store.docId);
-});
-
-window.addEventListener('beforeunload', (e) => {
-  if (model.store.dirty) { e.preventDefault(); e.returnValue = ''; }
-});
-
-// ---------------------------------------------------------------- menus
-
-async function exportAs(fmt) {
-  if (!model.store.docId) return;
-  await save({ quiet: true });
-  const response = await fetch(`/api/doc/${model.store.docId}/export/${fmt}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ annots: model.store.annots, colourTags: COLOUR_TAGS }),
-  });
-  if (!response.ok) { toast('書き出しに失敗しました', 'error'); return; }
-  downloadResponse(await response.blob(), response, `export.${fmt}`);
-}
-
-// Colour as meaning: the source material's point is that a colour convention
-// only pays off if it survives extraction, so these tags ride along to Markdown.
-const COLOUR_TAGS = {
-  '#ffe14d': '重要',
-  '#3fb950': '実行項目',
-  '#e0403a': '要検討',
-  '#2f6df6': 'メモ',
-};
-
-$('#btnMore').addEventListener('click', (e) => {
-  const has = model.store.annots.length;
-  openMenu(e.currentTarget, [
-    { label: `注釈一覧をPDFで書き出す（${has} 件）`, disabled: !has, action: () => exportAs('summary') },
-    { label: 'XFDFで書き出す（注釈だけ・軽量）', disabled: !has, action: () => exportAs('xfdf') },
-    { label: 'CSVで書き出す', disabled: !has, action: () => exportAs('csv') },
-    { label: 'Markdownで書き出す（色をタグとして保持）', disabled: !has, action: () => exportAs('markdown') },
-    '-',
-    { label: 'XFDFを読み込む', disabled: !model.store.docId, action: () => $('#xfdfInput').click() },
-    '-',
-    { label: '注釈をフラット化する（元に戻せません）', disabled: !has, action: flattenAnnots },
-    { label: '注釈をすべて削除する', disabled: !has, action: clearAnnots },
-    { note: 'フラット化・全削除の前に、自動でバックアップを取ります。' },
-  ]);
-});
-
-async function flattenAnnots() {
-  const ok = await confirmDialog({
-    title: '注釈をフラット化しますか',
-    intro: `${model.store.annots.length} 件の注釈をページの中身として焼き付けます。相手の環境で確実に同じ表示になり、読み上げにも乗ります。`,
-    warning: 'フラット化した注釈は、二度と選択・移動・削除できません。実行前の状態は data/work 内にスナップショットとして自動保存されます。',
-    confirmLabel: 'フラット化する',
-    danger: true,
-  });
-  if (!ok) return;
-  const result = await structural('/flatten', {}, { label: 'フラット化' });
-  if (result) toast(`フラット化しました（バックアップ: ${result.backup}）`);
-}
-
-async function clearAnnots() {
-  const ok = await confirmDialog({
-    title: '注釈をすべて削除しますか',
-    intro: `${model.store.annots.length} 件の注釈を取り除きます。ページの中身はそのまま残ります。`,
-    warning: '実行前の状態は data/work 内にスナップショットとして自動保存されます。',
-    confirmLabel: 'すべて削除する',
-    danger: true,
-  });
-  if (!ok) return;
-  const result = await structural('/clear-annots', {}, { label: '削除' });
-  if (result) toast(`${result.removed} 件の注釈を削除しました（バックアップ: ${result.backup}）`);
-}
-
-// ---------------------------------------------------------------- document menu
-
-/** Show the page is working. Long server work would otherwise look like a hang. */
-function busy(message) {
-  $('#busyText').textContent = message;
-  $('#busy').hidden = false;
-  return () => { $('#busy').hidden = true; };
-}
-
-/** Every layer ②/③ call reloads the file, so they share one code path. */
-async function structural(url, payload, { method = 'POST', label } = {}) {
-  if (!model.store.docId) return null;
-  const done = busy(`${label || '処理'}しています…`);
-  try {
-    const response = await fetch(`/api/doc/${model.store.docId}${url}`, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ annots: model.store.annots, ...payload }),
-    });
-    if (!response.ok) {
-      let detail = response.status;
-      try { detail = (await response.json()).detail; } catch { /* not json */ }
-      toast(`${label || '操作'}に失敗しました: ${detail}`, 'error');
-      return null;
-    }
-    const result = await response.json();
-    state.toc = result.toc || [];
-    model.loadDocument(result);
-    await viewer.load(`/api/doc/${model.store.docId}/file?t=${Date.now()}`);
-    renderOutline($('#panelOutline'), state.toc, (page) => viewer.scrollToPage(page));
-    renderThumbs($('#panelThumbs'), viewer, viewer.currentPage, (page) => viewer.scrollToPage(page));
-    refreshAll();
-    return result;
-  } catch (err) {
-    toast(`${label || '操作'}に失敗しました: ${err.message}`, 'error');
-    return null;
-  } finally {
-    done();
-  }
-}
-
-function currentPages() {
-  return [viewer.currentPage];
-}
-
-$('#btnDoc').addEventListener('click', (e) => {
-  const open = !!model.store.docId;
-  const page = viewer.currentPage + 1;
-  const redactions = model.store.annots.filter((a) => a.type === 'redact').length;
-  openMenu(e.currentTarget, [
-    { heading: 'ページ' },
-    { label: `${page} ページ目を右に90°回転`, disabled: !open,
-      action: () => structural('/pages/rotate', { pages: currentPages(), degrees: 90 }, { label: '回転' }) },
-    { label: `${page} ページ目を削除`, disabled: !open, action: deletePage },
-    { label: `${page} ページ目を複製`, disabled: !open,
-      action: () => structural('/pages/duplicate', { pages: currentPages() }, { label: '複製' }) },
-    { label: '白紙ページを後ろに挿入', disabled: !open,
-      action: () => structural('/pages/blank', { at: viewer.currentPage + 1 }, { label: '挿入' }) },
-    { label: '別のPDFを結合', disabled: !open, action: () => $('#mergeInput').click() },
-    { label: `${page} ページ目を抽出して保存`, disabled: !open, action: extractPage },
-    '-',
-    { heading: '墨消し' },
-    { label: `墨消しを適用する（${redactions} 箇所・元に戻せません）`,
-      disabled: !redactions, action: applyRedactions },
-    { label: '検索して墨消しを指定', disabled: !open, action: redactBySearch },
-    { label: '非表示情報を削除（メタデータ・埋め込み等）', disabled: !open, action: scrubDocument },
-    '-',
-    { heading: 'ページ全体への追記' },
-    { label: '透かしを入れる', disabled: !open, action: addWatermark },
-    { label: 'ヘッダー・フッターを入れる', disabled: !open, action: addHeaderFooter },
-    { label: 'ベイツ番号を振る', disabled: !open, action: addBates },
-    '-',
-    { heading: '本文・OCR' },
-    { label: 'OCR（スキャンPDFを検索可能に）', disabled: !open, action: runOcr },
-    { label: '本文を検索して置換', disabled: !open, action: searchReplaceText },
-    '-',
-    { heading: 'フォーム' },
-    { label: 'フォーム欄を確認・入力', disabled: !open, action: showFields },
-    { label: '罫線からフォーム欄を自動作成', disabled: !open, action: detectFields },
-    { label: 'フォームデータを書き出す（FDF）', disabled: !open, action: () => exportFields('fdf') },
-    { label: 'フォームデータを書き出す（CSV）', disabled: !open, action: () => exportFields('csv') },
-    { label: 'フォームデータを読み込む', disabled: !open, action: () => $('#fdfInput').click() },
-    { label: '複数の回答を集計する', disabled: !open, action: () => $('#collateInput').click() },
-    '-',
-    { heading: '文書を比べる' },
-    { label: '別の版と比較（差分を雲形注釈に）', disabled: !open, action: () => startCompare('diff') },
-    { label: '別の版と重ね合わせる（色分けPDF）', disabled: !open, action: () => startCompare('overlay') },
-    '-',
-    { heading: '署名' },
-    { label: '署名を置く（手書き・タイプ・画像）', disabled: !open, action: addSignature },
-    { label: '署名欄を作る（相手に署名してもらう）', disabled: !open, action: addSignatureField },
-    { label: '署名の状態を確認', disabled: !open, action: showSignatureState },
-    '-',
-    { heading: 'アクセシビリティ' },
-    { label: 'アクセシビリティを点検する', disabled: !open, action: runAccessibilityAudit },
-    { label: '読み上げ順序を確認する', disabled: !open, action: showReadingOrder },
-    '-',
-    { heading: 'ファイル' },
-    { label: 'パスワードで保護して書き出す', disabled: !open, action: protectDocument },
-    { label: 'ファイルを最適化する', disabled: !open, action: optimiseDocument },
-  ]);
-});
-
-// ---------------------------------------------------------------- signatures
-
-async function addSignature() {
-  const signatures = await (await fetch(`/api/doc/${model.store.docId}/signatures`)).json();
-  const values = await formDialog({
-    title: '署名を置く',
-    intro: `${viewer.currentPage + 1} ページ目の右下に置きます。`,
-    warning: signatures.note,
-    fields: [
-      { key: 'kind', label: '種類', type: 'select',
-        options: { typed: 'タイプ（フォントで生成）', drawn: '手書き風' } },
-      { key: 'name', label: '氏名', value: getPref('author') || '' },
-      { key: 'size', label: '文字サイズ', type: 'number', value: 20, min: 8, max: 48 },
-      { key: 'colour', label: '色', type: 'colour', value: '#12305e' },
-      { key: 'block', label: '日時などを添える', type: 'checkbox', value: true },
-      { key: 'reason', label: '理由', placeholder: '例: 内容確認のため' },
-    ],
-    confirmLabel: '置く',
-  });
-  if (!values || !values.name.trim()) return;
-
-  const page = model.store.pages[viewer.currentPage];
-  const rect = [page.width - 250, page.height - 150, page.width - 60, page.height - 110];
-  const payload = { ...values, page: viewer.currentPage, rect };
-  if (values.kind === 'drawn') {
-    // A quick script-like path so a typed name can still look handwritten.
-    payload.strokes = [{ pts: handwritingPath(values.name, rect) }];
-    payload.width = 1.6;
-  }
-  const result = await structural('/sign', payload, { label: '署名' });
-  if (result) toast(`署名を置きました（バックアップ: ${result.backup}）`);
-}
-
-/** A wavy baseline through the signature box — a stand-in for a real hand. */
-function handwritingPath(name, rect) {
-  const [x0, y0, x1, y1] = rect;
-  const midY = (y0 + y1) / 2;
-  const points = [];
-  const steps = Math.max(40, name.length * 12);
-  for (let i = 0; i <= steps; i += 1) {
-    const t = i / steps;
-    points.push([
-      x0 + t * (x1 - x0),
-      midY + Math.sin(t * Math.PI * name.length) * (y1 - y0) * 0.28
-        + Math.sin(t * Math.PI * 2) * (y1 - y0) * 0.12,
-    ]);
-  }
-  return points;
-}
-
-async function addSignatureField() {
-  const values = await formDialog({
-    title: '署名欄を作る',
-    intro: '空の署名欄を置きます。この文書を受け取った人が、対応するビューアで署名できます。',
-    fields: [{ key: 'name', label: '欄の名前', value: '承認者' }],
-    confirmLabel: '作る',
-  });
-  if (!values) return;
-  const page = model.store.pages[viewer.currentPage];
-  const rect = [page.width - 250, page.height - 150, page.width - 60, page.height - 110];
-  const result = await structural('/sign', {
-    kind: 'field', name: values.name, page: viewer.currentPage, rect,
-  }, { label: '署名欄' });
-  if (result) toast('署名欄を作りました');
-}
-
-async function showSignatureState() {
-  const signatures = await (await fetch(`/api/doc/${model.store.docId}/signatures`)).json();
-  const lines = signatures.fields.length
-    ? signatures.fields
-      .map((f) => `・${f.name || '(無名)'} — ${f.page + 1}ページ・${f.signed ? '署名済み' : '未署名'}`)
-      .join('\n')
-    : '署名欄はありません。';
-  await confirmDialog({
-    title: '署名の状態',
-    intro: lines,
-    warning: signatures.note,
-    confirmLabel: '閉じる',
-  });
-}
-
-// ---------------------------------------------------------------- accessibility
-
-const SEVERITY = { high: '重要', medium: '中', low: '軽微' };
-
-async function runAccessibilityAudit() {
-  const report = await (await fetch(`/api/doc/${model.store.docId}/accessibility`)).json();
-  if (report.passed) {
-    await confirmDialog({
-      title: 'アクセシビリティ点検',
-      intro: '問題は見つかりませんでした。タグ・言語・代替テキストがそろっています。',
-      confirmLabel: '閉じる',
-    });
-    return;
-  }
-  const body = report.issues
-    .map((i) => `【${SEVERITY[i.severity] || i.severity}】${i.title}\n  ${i.detail}\n  → ${i.fix}`)
-    .join('\n\n');
-  const needsTags = report.issues.some((i) => i.id === 'tags' || i.id === 'lang');
-  const ok = await confirmDialog({
-    title: `アクセシビリティの問題が ${report.issues.length} 件`,
-    intro: body,
-    warning: needsTags
-      ? 'タグと言語は「自動でタグを付ける」で一度に直せます。文字サイズから見出しを推定するので、結果は確認してください。'
-      : undefined,
-    confirmLabel: needsTags ? '自動でタグを付ける' : '閉じる',
-  });
-  if (!ok || !needsTags) return;
-
-  const result = await structural('/accessibility/autotag', { language: 'ja-JP' },
-    { label: 'タグ付け' });
-  if (!result) return;
-  const remaining = result.audit?.issues?.length || 0;
-  toast(remaining
-    ? `${result.elements} 要素にタグを付けました。残りの指摘は ${remaining} 件です`
-    : `${result.elements} 要素にタグを付けました（見出し ${result.headings} 個）`);
-}
-
-async function showReadingOrder() {
-  const data = await (await fetch(
-    `/api/doc/${model.store.docId}/accessibility/order/${viewer.currentPage}`,
-  )).json();
-  if (!data.blocks.length) {
-    toast('このページにはテキストがありません。OCRが必要かもしれません', 'warn');
-    return;
-  }
-  // Draw the order on the page rather than only listing it: seeing the path is
-  // how you notice that a sidebar gets read in the middle of a paragraph.
-  const view = viewer.pageViews[viewer.currentPage];
-  const layer = view.draw;
-  for (const node of layer.querySelectorAll('.order-mark')) node.remove();
-  const ns = 'http://www.w3.org/2000/svg';
-  const path = document.createElementNS(ns, 'polyline');
-  path.setAttribute('class', 'order-mark');
-  path.setAttribute('points', data.blocks
-    .map((b) => `${(b.rect[0] + b.rect[2]) / 2},${(b.rect[1] + b.rect[3]) / 2}`).join(' '));
-  path.setAttribute('fill', 'none');
-  path.setAttribute('stroke', '#2f6df6');
-  path.setAttribute('stroke-width', '1.5');
-  path.setAttribute('stroke-dasharray', '5 3');
-  layer.append(path);
-  for (const block of data.blocks) {
-    const badge = document.createElementNS(ns, 'g');
-    badge.setAttribute('class', 'order-mark');
-    const cx = (block.rect[0] + block.rect[2]) / 2;
-    const cy = (block.rect[1] + block.rect[3]) / 2;
-    const circle = document.createElementNS(ns, 'circle');
-    circle.setAttribute('cx', cx); circle.setAttribute('cy', cy);
-    circle.setAttribute('r', '9'); circle.setAttribute('fill', '#2f6df6');
-    const text = document.createElementNS(ns, 'text');
-    text.setAttribute('x', cx); text.setAttribute('y', cy);
-    text.setAttribute('text-anchor', 'middle');
-    text.setAttribute('dominant-baseline', 'central');
-    text.setAttribute('fill', '#fff');
-    text.setAttribute('font-size', '10');
-    text.textContent = String(block.order);
-    badge.append(circle, text);
-    layer.append(badge);
-  }
-  toast(`読み上げ順序を ${data.blocks.length} ブロック分表示しました（Escで消えます）`);
-}
-
-// ---------------------------------------------------------------- forms
-
-async function showFields() {
-  const data = await (await fetch(`/api/doc/${model.store.docId}/fields`)).json();
-  if (data.hasXfa) {
-    await confirmDialog({
-      title: 'XFAフォームです',
-      intro: 'この文書はAdobe独自のXFA形式のフォームを含んでいます。XFAはPDF 2.0で廃止されており、Acrobat以外のビューアでは開けません。このアプリも対応していません。',
-      warning: '「フォームが開けない」という現象の主な原因がこれです。作成側にAcroForm形式での再出力を依頼してください。',
-      confirmLabel: '閉じる',
-    });
-    return;
-  }
-  if (!data.fields.length) {
-    toast('この文書にはフォーム欄がありません。「罫線からフォーム欄を自動作成」を試せます', 'warn');
-    return;
-  }
-  const fillable = data.fields.filter((f) => !['button', 'signature'].includes(f.type));
-  const values = await formDialog({
-    title: 'フォーム入力',
-    intro: `${data.fields.length} 個のフォーム欄があります。`,
-    fields: fillable.map((field) => ({
-      key: field.name,
-      label: `${field.name}${field.required ? ' *' : ''}`,
-      type: field.type === 'checkbox' ? 'checkbox'
-        : field.type === 'dropdown' || field.type === 'list' ? 'select' : 'text',
-      options: field.options?.length
-        ? Object.fromEntries(field.options.map((o) => [o, o])) : undefined,
-      value: field.type === 'checkbox' ? field.value === 'Yes' : (field.value ?? ''),
-    })),
-    confirmLabel: '入力する',
-  });
-  if (!values) return;
-  const payload = {};
-  for (const field of fillable) {
-    const value = values[field.name];
-    payload[field.name] = field.type === 'checkbox' ? (value ? 'Yes' : 'Off') : value;
-  }
-  const response = await fetch(`/api/doc/${model.store.docId}/fields/fill`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ values: payload }),
-  });
-  if (!response.ok) { toast('入力に失敗しました', 'error'); return; }
-  const result = await response.json();
-  await viewer.load(`/api/doc/${model.store.docId}/file?t=${Date.now()}`);
-  refreshAll();
-  toast(`${result.filled} 個のフォーム欄に入力しました`);
-}
-
-async function detectFields() {
-  const preview = await (await fetch(`/api/doc/${model.store.docId}/fields/detect`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page: viewer.currentPage }),
-  })).json();
-  const count = preview.candidates?.length || 0;
-  if (!count) { toast('フォーム欄にできそうな罫線が見つかりませんでした', 'warn'); return; }
-  const ok = await confirmDialog({
-    title: 'フォーム欄を自動作成しますか',
-    intro: `${viewer.currentPage + 1} ページ目の罫線や枠から、${count} 個の入力欄を作成できそうです。`,
-    warning: '自動判定なので、不要な欄ができることがあります。作成後に個別に消せます。',
-    confirmLabel: '作成する',
-  });
-  if (!ok) return;
-  const response = await fetch(`/api/doc/${model.store.docId}/fields/detect`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page: viewer.currentPage, create: true }),
-  });
-  const result = await response.json();
-  await viewer.load(`/api/doc/${model.store.docId}/file?t=${Date.now()}`);
-  refreshAll();
-  toast(`${result.created} 個のフォーム欄を作成しました`);
-}
-
-async function exportFields(fmt) {
-  const response = await fetch(`/api/doc/${model.store.docId}/fields/export/${fmt}`, { method: 'POST' });
-  if (!response.ok) { toast('書き出しに失敗しました', 'error'); return; }
-  downloadResponse(await response.blob(), response, `fields.${fmt}`);
-}
-
-$('#fdfInput').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  const form = new FormData();
-  form.append('file', file);
-  const response = await fetch(`/api/doc/${model.store.docId}/fields/import`, {
-    method: 'POST', body: form,
-  });
-  if (!response.ok) { toast('読み込めませんでした', 'error'); return; }
-  const result = await response.json();
-  await viewer.load(`/api/doc/${model.store.docId}/file?t=${Date.now()}`);
-  refreshAll();
-  toast(`${result.filled} 個のフォーム欄に読み込みました`);
-});
-
-$('#collateInput').addEventListener('change', async (e) => {
-  const files = [...e.target.files];
-  e.target.value = '';
-  if (!files.length) return;
-  const form = new FormData();
-  for (const file of files) form.append('files', file);
-  const response = await fetch(`/api/doc/${model.store.docId}/fields/collate`, {
-    method: 'POST', body: form,
-  });
-  if (!response.ok) { toast('集計に失敗しました', 'error'); return; }
-  downloadResponse(await response.blob(), response, 'collated.csv');
-});
-
-// ---------------------------------------------------------------- comparison
-
-let compareMode = 'diff';
-
-function startCompare(mode) {
-  compareMode = mode;
-  $('#compareInput').click();
-}
-
-$('#compareInput').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file || !model.store.docId) return;
-  await save({ quiet: true });
-  toast('比較しています…');
-  const form = new FormData();
-  form.append('file', file);
-  const url = `/api/doc/${model.store.docId}/compare?mode=${compareMode}`
-    + `&author=${encodeURIComponent(getPref('author') || '')}`;
-  const response = await fetch(url, { method: 'POST', body: form });
-  if (!response.ok) { toast('比較に失敗しました', 'error'); return; }
-
-  if (compareMode === 'overlay') {
-    downloadResponse(await response.blob(), response, 'overlay.pdf');
-    return;
-  }
-  const result = await response.json();
-  if (!result.differences) { toast('差分は見つかりませんでした'); return; }
-  model.addAnnots(result.annots, { select: false });
-  state.filters.type = 'square';
-  scheduleAutosave();
-  toast(`${result.differences} 箇所の差分を雲形注釈にしました（コメント欄で1件ずつ確認できます）`);
-});
-
-async function deletePage() {
-  const ok = await confirmDialog({
-    title: `${viewer.currentPage + 1} ページ目を削除しますか`,
-    intro: 'このページと、そのページ上の注釈がなくなります。',
-    warning: '実行前の状態はスナップショットとして自動保存されます。',
-    confirmLabel: '削除する', danger: true,
-  });
-  if (!ok) return;
-  const result = await structural('/pages/delete', { pages: currentPages() }, { label: 'ページ削除' });
-  if (result) toast(`ページを削除しました（バックアップ: ${result.backup}）`);
-}
-
-async function extractPage() {
-  await save({ quiet: true });
-  const response = await fetch(`/api/doc/${model.store.docId}/pages/extract`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pages: currentPages() }),
-  });
-  if (!response.ok) { toast('抽出に失敗しました', 'error'); return; }
-  downloadResponse(await response.blob(), response, 'extract.pdf');
-}
-
-$('#mergeInput').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file || !model.store.docId) return;
-  await save({ quiet: true });
-  const form = new FormData();
-  form.append('file', file);
-  const response = await fetch(`/api/doc/${model.store.docId}/merge`, { method: 'POST', body: form });
-  if (!response.ok) { toast('結合に失敗しました', 'error'); return; }
-  const result = await response.json();
-  state.toc = result.toc || [];
-  model.loadDocument(result);
-  await viewer.load(`/api/doc/${model.store.docId}/file?t=${Date.now()}`);
-  renderThumbs($('#panelThumbs'), viewer, viewer.currentPage, (p) => viewer.scrollToPage(p));
-  refreshAll();
-  toast(`${result.added} ページを結合しました`);
-});
-
-async function applyRedactions() {
-  const count = model.store.annots.filter((a) => a.type === 'redact').length;
-  const ok = await confirmDialog({
-    title: '墨消しを適用しますか',
-    intro: `${count} 箇所の墨消し指定を適用し、下にある文字と画像をファイルから実際に削除します。`,
-    warning: 'これは取り消せません。適用するまでは、黒く見えていても文字はコピーすれば読める状態です。実行前の状態はスナップショットとして自動保存されます。',
-    confirmLabel: '適用して削除する', danger: true,
-  });
-  if (!ok) return;
-  const result = await structural('/redact/apply', { images: true }, { label: '墨消しの適用' });
-  if (result) toast(`${result.applied} 箇所を削除しました（バックアップ: ${result.backup}）`);
-}
-
-async function redactBySearch() {
-  const values = await formDialog({
-    title: '検索して墨消しを指定',
-    intro: '一致した箇所すべてに墨消しの指定を付けます。適用は別操作です。',
-    fields: [
-      { key: 'query', label: '検索する文字列', placeholder: '例: 山田太郎' },
-      { key: 'overlay', label: '黒塗りの上に出す文字', placeholder: '例: ［非開示］', hint: '空欄なら文字は出ません' },
-    ],
-    confirmLabel: '指定する',
-  });
-  if (!values || !values.query.trim()) return;
-  const result = await structural('/redact/search', values, { label: '墨消しの指定' });
-  if (result) {
-    toast(result.marked
-      ? `${result.marked} 箇所に墨消しを指定しました。「墨消しを適用」で実際に削除されます`
-      : '一致する文字列が見つかりませんでした', result.marked ? '' : 'warn');
-  }
-}
-
-async function scrubDocument() {
-  const ok = await confirmDialog({
-    title: '非表示情報を削除しますか',
-    intro: '画面に出ないままファイルに残っている情報を取り除きます: メタデータ、埋め込みファイル、非表示テキスト、JavaScript、サムネイルなど。',
-    warning: '取り消せません。実行前の状態はスナップショットとして自動保存されます。',
-    confirmLabel: '削除する', danger: true,
-  });
-  if (!ok) return;
-  const result = await structural('/scrub', {}, { label: '非表示情報の削除' });
-  if (result) toast(`非表示情報を削除しました（バックアップ: ${result.backup}）`);
-}
-
-async function addWatermark() {
-  const values = await formDialog({
-    title: '透かしを入れる',
-    fields: [
-      { key: 'text', label: '文字', value: '社外秘' },
-      { key: 'colour', label: '色', type: 'colour', value: '#c0c0c0' },
-      { key: 'size', label: 'サイズ', type: 'number', value: 54, min: 8, max: 200 },
-      { key: 'opacity', label: '不透明度', type: 'number', value: 0.25, min: 0.05, max: 1, step: 0.05 },
-      { key: 'angle', label: '角度', type: 'number', value: 45, min: -90, max: 90 },
-      { key: 'allPages', label: '全ページに入れる', type: 'checkbox', value: true },
-    ],
-    confirmLabel: '入れる',
-  });
-  if (!values || !values.text.trim()) return;
-  const result = await structural('/stamp-pages', {
-    kind: 'watermark', ...values,
-    pages: values.allPages ? null : currentPages(),
-  }, { label: '透かし' });
-  if (result) toast(`透かしを入れました（バックアップ: ${result.backup}）`);
-}
-
-async function addHeaderFooter() {
-  const values = await formDialog({
-    title: 'ヘッダー・フッターを入れる',
-    intro: '{page} は現在のページ番号、{pages} は総ページ数に置き換わります。',
-    fields: [
-      { key: 'header', label: 'ヘッダー', placeholder: '例: レビュー用' },
-      { key: 'footer', label: 'フッター', value: '- {page} / {pages} -' },
-      { key: 'size', label: 'サイズ', type: 'number', value: 9, min: 5, max: 24 },
-      { key: 'colour', label: '色', type: 'colour', value: '#555555' },
-    ],
-    confirmLabel: '入れる',
-  });
-  if (!values || (!values.header.trim() && !values.footer.trim())) return;
-  const result = await structural('/stamp-pages', { kind: 'headerFooter', ...values },
-    { label: 'ヘッダー・フッター' });
-  if (result) toast(`ヘッダー・フッターを入れました（バックアップ: ${result.backup}）`);
-}
-
-async function addBates() {
-  const values = await formDialog({
-    title: 'ベイツ番号を振る',
-    intro: '文書をまたいで連続させる通し番号です。訴訟文書の管理で使われます。',
-    fields: [
-      { key: 'prefix', label: '接頭辞', placeholder: '例: ABC-' },
-      { key: 'start', label: '開始番号', type: 'number', value: 1, min: 0 },
-      { key: 'digits', label: '桁数', type: 'number', value: 6, min: 1, max: 12 },
-      { key: 'suffix', label: '接尾辞', placeholder: '' },
-    ],
-    confirmLabel: '振る',
-  });
-  if (!values) return;
-  const result = await structural('/stamp-pages', { kind: 'bates', ...values }, { label: 'ベイツ番号' });
-  if (result) toast(`ベイツ番号を振りました（バックアップ: ${result.backup}）`);
-}
-
-async function runOcr() {
-  const status = await (await fetch('/api/ocr/status')).json();
-  if (!status.installed) {
-    await confirmDialog({
-      title: 'このブラウザ版はOCRに対応していません',
-      intro: 'OCR には Tesseract という実行ファイルが必要ですが、ブラウザの中では実行できません。OCRが必要な場合は、ローカルインストール版（サーバ版）をお使いください。',
-      confirmLabel: '閉じる',
-    });
-    return;
-  }
-  const langs = {};
-  if (status.japanese) langs['jpn+eng'] = '日本語 + 英語';
-  langs.eng = '英語のみ';
-  if (status.japanese) langs.jpn = '日本語のみ';
-
-  const values = await formDialog({
-    title: 'OCR（スキャンPDFを検索可能に）',
-    intro: 'テキストが入っていないページだけを処理します。認識した文字は画像の上に見えない層として埋め込まれ、検索・選択できるようになります。',
-    fields: [
-      { key: 'language', label: '言語', type: 'select', options: langs },
-      { key: 'layout', label: 'レイアウト', type: 'select',
-        options: { block: '通常の文書（推奨）', auto: '段組みのある文書', line: '1行だけ', sparse: 'まばらな文字' },
-        hint: '日本語と英字が混ざる文書では「通常の文書」の方が精度が高いことを確認しています' },
-      { key: 'dpi', label: '解像度(dpi)', type: 'number', value: 300, min: 150, max: 600, step: 50 },
-      { key: 'allPages', label: '全ページを対象にする', type: 'checkbox', value: true },
-    ],
-    confirmLabel: '実行する',
-  });
-  if (!values) return;
-  toast('OCRを実行しています…（ページ数によっては時間がかかります）');
-  const result = await structural('/ocr', {
-    ...values, pages: values.allPages ? null : currentPages(),
-  }, { label: 'OCR' });
-  if (result) {
-    toast(result.pages
-      ? `${result.pages} ページをOCRしました（${result.characters} 文字・バックアップ: ${result.backup}）`
-      : `テキストが既に入っているため処理しませんでした（${result.skipped} ページ）`,
-      result.pages ? '' : 'warn');
-  }
-}
-
-async function searchReplaceText() {
-  const values = await formDialog({
-    title: '本文を検索して置換',
-    intro: '注釈ではなく、ページの中身そのものを書き換えます。',
-    warning: '元の文字は墨消しで実際に削除されてから、新しい文字が置かれます。取り消せません。',
-    fields: [
-      { key: 'query', label: '検索する文字列' },
-      { key: 'replacement', label: '置き換える文字列' },
-      { key: 'colour', label: '文字色', type: 'colour', value: '#000000' },
-    ],
-    confirmLabel: '置換する', danger: true,
-  });
-  if (!values || !values.query.trim()) return;
-  const result = await structural('/text/search-replace', values, { label: '置換' });
-  if (result) {
-    toast(result.replaced
-      ? `${result.replaced} 箇所を置換しました（バックアップ: ${result.backup}）`
-      : '一致する文字列が見つかりませんでした', result.replaced ? '' : 'warn');
-  }
-}
-
-async function protectDocument() {
-  const values = await formDialog({
-    title: 'パスワードで保護して書き出す',
-    intro: '保護をかけた別ファイルとして書き出します。編集中の文書はそのままです。',
-    fields: [
-      { key: 'userPassword', label: '開くためのパスワード', type: 'password' },
-      { key: 'ownerPassword', label: '権限変更用パスワード', type: 'password',
-        hint: '開く用と別にしてください。同じにすると権限の制限が効きません' },
-      { key: 'print', label: '印刷を許可', type: 'checkbox', value: true },
-      { key: 'copy', label: 'コピーを許可', type: 'checkbox', value: true },
-      { key: 'modify', label: '編集を許可', type: 'checkbox', value: false },
-      { key: 'annotate', label: '注釈を許可', type: 'checkbox', value: true },
-    ],
-    confirmLabel: '書き出す',
-  });
-  if (!values) return;
-  if (!values.userPassword && !values.ownerPassword) {
-    toast('パスワードを入力してください', 'warn');
-    return;
-  }
-  await save({ quiet: true });
-  const response = await fetch(`/api/doc/${model.store.docId}/protect`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      annots: model.store.annots,
-      userPassword: values.userPassword,
-      ownerPassword: values.ownerPassword,
-      permissions: {
-        print: values.print, copy: values.copy,
-        modify: values.modify, annotate: values.annotate,
-      },
-    }),
-  });
-  if (!response.ok) { toast('保護に失敗しました', 'error'); return; }
-  downloadResponse(await response.blob(), response, 'protected.pdf');
-}
-
-async function optimiseDocument() {
-  toast('最適化しています…');
-  const result = await structural('/optimise', {}, { label: '最適化' });
-  if (!result) return;
-  const kb = (n) => `${Math.round(n / 1024)}KB`;
-  toast(result.saved > 1024
-    ? `最適化しました: ${kb(result.before)} → ${kb(result.actual)}`
-    : `すでに最適化済みでした（${kb(result.actual)}）`);
-}
-
-function downloadResponse(blob, response, fallback) {
-  const disposition = response.headers.get('Content-Disposition') || '';
-  const match = /filename\*=UTF-8''([^;]+)/.exec(disposition);
-  const name = match ? decodeURIComponent(match[1]) : fallback;
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name;
-  link.click();
-  URL.revokeObjectURL(url);
-  toast(`${name} を書き出しました`);
-}
-
-$('#xfdfInput').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file || !model.store.docId) return;
-  const form = new FormData();
-  form.append('file', file);
-  const response = await fetch(`/api/doc/${model.store.docId}/import-xfdf`, {
-    method: 'POST', body: form,
-  });
-  if (!response.ok) { toast('XFDFを読み込めませんでした', 'error'); return; }
-  const { annots: incoming } = await response.json();
-  if (!incoming.length) { toast('XFDFに注釈が入っていませんでした', 'warn'); return; }
-  model.addAnnots(incoming, { select: false });
-  scheduleAutosave();
-  toast(`${incoming.length} 件の注釈を取り込みました`);
-});
-
-// ---------------------------------------------------------------- search
+// ================================================================ search
 
 async function runSearch() {
   const query = $('#searchInput').value.trim();
-  if (!query || !model.store.docId) {
+  state.searchQuery = query;
+  if (!query || !hasDoc()) {
     state.searchHits = [];
     state.searchIndex = -1;
     $('#searchCount').textContent = '';
     drawSearchHits();
     return;
   }
-  const response = await fetch(`/api/doc/${model.store.docId}/search`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query }),
-  });
+  const response = await post('/search', { query });
+  if (!response.ok) { toast('検索に失敗しました', 'error'); return; }
   const data = await response.json();
+  if ($('#searchInput').value.trim() !== query) return; // the query moved on while this ran
   state.searchHits = data.hits || [];
   state.searchIndex = state.searchHits.length ? 0 : -1;
   $('#searchCount').textContent = state.searchHits.length ? `${state.searchHits.length} 件` : '該当なし';
   drawSearchHits();
-  if (state.searchIndex >= 0) goToHit(0);
+  ribbon.refresh();
+  if (state.searchIndex >= 0) {
+    // Start from the first hit at or after the page being read.
+    const from = state.searchHits.findIndex((hit) => hit.page >= viewer.currentPage);
+    goToHit(from >= 0 ? from : 0);
+  } else if (!model.store.pages.length) {
+    toast('検索できる文字がありません');
+  }
 }
 
 function drawSearchHits() {
   for (const view of viewer.pageViews) {
-    for (const node of view.draw.querySelectorAll('.search-hit')) node.remove();
+    for (const hit of view.draw.querySelectorAll('.search-hit')) hit.remove();
   }
   state.searchHits.forEach((hit, index) => {
     const view = viewer.pageViews[hit.page];
@@ -1268,47 +1409,55 @@ function goToHit(index) {
   $('#searchCount').textContent = `${state.searchIndex + 1} / ${state.searchHits.length}`;
 }
 
-$('#searchInput').addEventListener('change', runSearch);
-$('#searchInput').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); state.searchHits.length ? goToHit(state.searchIndex + 1) : runSearch(); }
+let searchTimer;
+$('#searchInput').addEventListener('input', (e) => {
+  clearTimeout(searchTimer);
+  // Typing through an input method fires input events for the unconverted
+  // kana; wait for the conversion to finish before searching.
+  if (e.isComposing) return;
+  searchTimer = setTimeout(runSearch, 400);
 });
-$('#btnSearchNext').addEventListener('click', () => goToHit(state.searchIndex + 1));
+$('#searchInput').addEventListener('compositionend', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
+$('#searchInput').addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (isComposing(e)) return;
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    clearTimeout(searchTimer);
+    if (state.searchHits.length && state.searchQuery === e.target.value.trim()) goToHit(state.searchIndex + (e.shiftKey ? -1 : 1));
+    else runSearch();
+  } else if (e.key === 'Escape') {
+    e.target.value = '';
+    runSearch();
+    e.target.blur();
+  }
+});
+$('#btnSearchNext').addEventListener('click', () => (state.searchHits.length ? goToHit(state.searchIndex + 1) : runSearch()));
 $('#btnSearchPrev').addEventListener('click', () => goToHit(state.searchIndex - 1));
 
-$('#btnSearchMarkup').addEventListener('click', () => {
-  if (!state.searchHits.length) { toast('先に検索してください', 'warn'); return; }
-  const markupTools = ['highlight', 'underline', 'squiggly', 'strikeout'];
-  const tool = markupTools.includes(tools.tool) ? tools.tool : 'highlight';
-  const byPage = new Map();
-  for (const hit of state.searchHits) {
-    if (!byPage.has(hit.page)) byPage.set(hit.page, []);
-    byPage.get(hit.page).push(hit.quad);
-  }
-  const items = [];
-  for (const [page, quads] of byPage) {
-    for (const quad of quads) {
-      const xs = [quad[0], quad[2], quad[4], quad[6]];
-      const ys = [quad[1], quad[3], quad[5], quad[7]];
-      items.push({
-        type: tool, page, quads: [quad],
-        rect: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
-        style: tools.style,
-        author: getPref('author') || '',
-        subject: `検索一括: ${$('#searchInput').value}`,
-        flags: { print: true, locked: false, readOnly: false, hidden: false },
-      });
-    }
-  }
+function markAllHits() {
+  if (!state.searchHits.length) { toast('先に右上の検索欄で検索してください', 'warn'); return; }
+  const kind = MARKUP_TOOLS.has(tools.tool) ? tools.tool : 'highlight';
+  const items = state.searchHits.map((hit) => {
+    const quad = hit.quad;
+    const xs = [quad[0], quad[2], quad[4], quad[6]];
+    const ys = [quad[1], quad[3], quad[5], quad[7]];
+    return {
+      type: kind, page: hit.page, quads: [quad],
+      rect: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+      style: styleFor(kind), author: getPref('author') || '',
+      subject: state.searchQuery, flags: FLAGS(),
+    };
+  });
   model.addAnnots(items, { select: false });
-  toast(`${items.length} 箇所に${typeLabel({ type: tool })}を適用しました`);
-  scheduleAutosave();
-});
+  toast(`「${state.searchQuery}」${items.length} 箇所に${typeLabel({ type: kind })}を引きました`);
+}
 
-// ---------------------------------------------------------------- measuring
+// ================================================================ measuring
 
 function startCalibration() {
   selectTool('calibrate');
-  toast('図面上で、実寸のわかっている2点をクリックしてください');
+  toast('図面上で、実際の長さが分かっている2点を順にクリックしてください');
 }
 
 tools.addEventListener('calibrated', async (e) => {
@@ -1316,38 +1465,24 @@ tools.addEventListener('calibrated', async (e) => {
   const pagePoints = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
   const values = await formDialog({
     title: '縮尺を設定',
-    intro: `なぞった長さは ${pagePoints.toFixed(1)} pt でした。これが実際に何メートル（何ミリ）にあたるかを入力してください。`,
+    intro: 'なぞった2点の間は、実際にはどれだけの長さですか。',
     fields: [
       { key: 'realLength', label: '実際の長さ', type: 'number', value: 1, min: 0.0001, step: 0.01 },
-      { key: 'unit', label: '単位', type: 'select', options: measure.UNIT_LABELS,
-        value: measure.getScale().unit },
+      { key: 'unit', label: '単位', type: 'select', options: measure.UNIT_LABELS, value: measure.getScale().unit },
     ],
+    validate: (v) => (v.realLength > 0 ? null : '0より大きい長さを入力してください'),
     confirmLabel: '設定する',
   });
   selectTool('select');
-  if (!values || !(values.realLength > 0)) return;
+  if (!values) return;
   measure.calibrateFrom(p1, p2, values.realLength, values.unit);
   refreshPanels();
-  const f = measure.factor();
-  toast(`縮尺を設定しました（1 pt = ${f.toPrecision(4)} ${values.unit}）`);
+  toast(`縮尺を設定しました（図面上 ${pagePoints.toFixed(0)}pt = ${values.realLength}${values.unit}）`);
 });
 
 tools.addEventListener('measured', () => {
-  if (!measure.isCalibrated()) {
-    toast('縮尺が未設定のため、値はページ上の長さのままです', 'warn');
-  }
+  if (!measure.isCalibrated()) toast('縮尺が未設定のため、値は紙の上の長さです。「縮尺」で設定できます', 'warn');
 });
-
-async function exportTakeoff() {
-  if (!model.store.docId) return;
-  const response = await fetch(`/api/doc/${model.store.docId}/takeoff`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ annots: model.store.annots, csv: true }),
-  });
-  if (!response.ok) { toast('書き出しに失敗しました', 'error'); return; }
-  downloadResponse(await response.blob(), response, 'takeoff.csv');
-}
 
 /** Draw the legend as annotations, so it moves and prints with the markup. */
 function placeLegend() {
@@ -1355,146 +1490,496 @@ function placeLegend() {
   if (!rows.length) return;
   const page = viewer.currentPage;
   const width = 210;
-  const lineHeight = 15;
+  const lineHeight = 16;
   const x = 40;
   let y = 40;
   const items = [{
     type: 'square', page,
-    rect: [x - 8, y - 8, x + width, y + rows.length * lineHeight + 16],
+    rect: [x - 8, y - 8, x + width, y + rows.length * lineHeight + 12],
     style: { stroke: '#1c1f26', fill: '#ffffff', width: 1, opacity: 0.95, cloudIntensity: 0 },
-    subject: '凡例',
-    author: getPref('author') || '',
-    flags: { print: true, locked: false, readOnly: false, hidden: false },
+    subject: '凡例', author: getPref('author') || '', flags: FLAGS(),
   }];
+  const texts = [];
   for (const row of rows) {
     items.push({
-      type: 'square', page,
-      rect: [x, y + 2, x + 10, y + 12],
+      type: 'square', page, rect: [x, y + 3, x + 10, y + 13],
       style: { stroke: row.colour, fill: row.colour, width: 1, opacity: 1 },
-      subject: '凡例',
-      flags: { print: true, locked: false, readOnly: false, hidden: false },
+      subject: '凡例', flags: FLAGS(),
     });
     const total = row.kind === 'count' ? `${row.count} 個` : `${row.count} 件 / ${row.total} ${row.unit}`;
+    const id = model.uid();
+    texts.push(id);
     items.push({
-      type: 'freetext', page,
-      rect: [x + 16, y, x + width - 4, y + 14],
-      text: `${row.label}  ${total}`,
-      style: {
-        stroke: '#1c1f26', fill: null, width: 0, opacity: 1,
-        font: { family: 'japan', size: 9, color: '#1c1f26', align: 'left' },
-      },
-      subject: '凡例',
-      flags: { print: true, locked: false, readOnly: false, hidden: false },
+      id, type: 'freetext', page, rect: [x + 14, y, x + width - 4, y + lineHeight],
+      text: `${row.label}  ${total}`, contents: `${row.label}  ${total}`, autoWidth: true,
+      style: { stroke: '#1c1f26', fill: null, width: 0, opacity: 1,
+        font: { family: 'gothic', size: 9, color: '#1c1f26', align: 'left', bold: false } },
+      subject: '凡例', flags: FLAGS(),
     });
     y += lineHeight;
   }
   model.addAnnots(items, { select: false });
+  ensureFontLoaded({ family: 'gothic', size: 9 }).then(() => refitText(texts));
   viewer.scrollToPage(page, 0);
-  scheduleAutosave();
-  toast(`凡例を ${page + 1} ページ目に置きました`);
+  toast(`凡例を ${page + 1} ページ目の左上に置きました`);
 }
 
-// ---------------------------------------------------------------- inline text editing
+// ================================================================ extras
 
-let editor = null;
+let speaking = false;
+async function readAloud() {
+  if (!('speechSynthesis' in window)) { toast('このブラウザは読み上げに対応していません', 'warn'); return; }
+  if (speaking) { window.speechSynthesis.cancel(); speaking = false; ribbon.refresh(); return; }
+  const selected = document.getSelection()?.toString().trim();
+  let text = selected;
+  if (!text) {
+    const response = await fetch(docUrl(`/page-text/${viewer.currentPage}`));
+    text = response.ok ? (await response.json()).text : '';
+  }
+  if (!text || !text.trim()) { toast('このページには読み上げられる文字がありません', 'warn'); return; }
+  const utterance = new SpeechSynthesisUtterance(text.replace(/\s*\n\s*/g, ' '));
+  // Mostly-Latin text is read with an English voice, otherwise Japanese.
+  const latin = (text.match(/[A-Za-z]/g) || []).length;
+  utterance.lang = latin > text.length * 0.5 ? 'en-US' : 'ja-JP';
+  utterance.onend = () => { speaking = false; ribbon.refresh(); };
+  utterance.onerror = utterance.onend;
+  speaking = true;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+  ribbon.refresh();
+  toast(selected ? '選択した文字を読み上げています（もう一度押すと止まります）' : `${viewer.currentPage + 1} ページ目を読み上げています（もう一度押すと止まります）`);
+}
 
-tools.addEventListener('edit-text', (e) => startTextEdit(e.detail.id, e.detail.isNew));
-
-function startTextEdit(id, isNew = false) {
-  closeEditor();
-  const annot = model.byId(id);
-  if (!annot) return;
-  const view = viewer.pageViews[annot.page];
-  if (!view) return;
-
-  const isNote = annot.type === 'note';
-  const scale = viewer.scale;
-  const [x0, y0, x1, y1] = annot.rect;
-
-  const box = document.createElement('textarea');
-  box.className = 'ft-editor';
-  box.value = (isNote ? annot.contents : annot.text) || '';
-  box.style.left = `${(isNote ? x1 + 4 : x0) * scale}px`;
-  box.style.top = `${y0 * scale}px`;
-  box.style.width = `${(isNote ? 200 : Math.max(60, x1 - x0)) * scale}px`;
-  box.style.height = `${(isNote ? 70 : Math.max(20, y1 - y0)) * scale}px`;
-  box.style.fontSize = `${(annot.style?.font?.size || 12) * scale}px`;
-  box.style.textAlign = annot.style?.font?.align || 'left';
-
-  view.wrap.append(box);
-  box.focus();
-  box.select();
-
-  editor = { box, id, isNew, isNote };
-
-  box.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { event.preventDefault(); closeEditor({ cancel: true }); }
-    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); closeEditor(); }
-    event.stopPropagation();
+/**
+ * Recognise the text in scanned pages so they can be searched, selected and
+ * highlighted. Runs entirely in the browser; the recogniser and its language
+ * data are downloaded the first time (about 20 MB) and cached after that.
+ */
+async function runOcr() {
+  const values = await formDialog({
+    title: 'スキャンした文書を文字認識する（OCR）',
+    intro: '画像になっている文字を読み取り、検索・選択・マーカーができるようにします。見た目は変わりません。',
+    warning: '初回は認識エンジンと言語データ（約20MB）をダウンロードします。1ページあたり数秒〜十数秒かかります。処理はこの端末の中だけで行われます。',
+    fields: [
+      { key: 'scope', label: '対象', type: 'select', options: { picked: describePages(targetPages()), all: `すべてのページ（${model.store.pages.length}）` } },
+      { key: 'lang', label: '言語', type: 'select', options: { 'jpn+eng': '日本語 + 英語', eng: '英語のみ', jpn: '日本語のみ' } },
+    ],
+    confirmLabel: '認識する',
   });
-  box.addEventListener('blur', () => closeEditor());
+  if (!values) return;
+  const pages = values.scope === 'all' ? model.store.pages.map((_, i) => i) : targetPages();
+  const done = busy('文字認識の準備をしています…');
+  let worker = null;
+  try {
+    await paint();
+    const tesseract = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.esm.min.js');
+    const createWorker = tesseract.createWorker || tesseract.default.createWorker;
+    worker = await createWorker(values.lang.split('+'));
+    const sheets = [];
+    for (const [count, index] of pages.entries()) {
+      $('#busyText').textContent = `文字を認識しています… ${count + 1} / ${pages.length} ページ`;
+      const view = viewer.pageViews[index];
+      const scale = Math.min(3, 2200 / Math.max(view.width, view.height));
+      const viewport = view.page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      await view.page.render({ canvasContext: canvas.getContext('2d'), viewport, canvas, annotationMode: 0 }).promise;
+      const { data } = await worker.recognize(canvas);
+      const words = [];
+      for (const w of (data.words || [])) {
+        if (!w.text || !w.text.trim() || w.confidence < 35) continue;
+        // The line's height gives a steadier text size than one word's own
+        // box, which shrinks around small kana and punctuation.
+        const line = w.line?.bbox || w.bbox;
+        const cjk = /[　-鿿＀-￯]/.test(w.text);
+        // Japanese has no spaces, so the recogniser's "words" are arbitrary
+        // runs; placing each character where it was seen keeps a selection
+        // or a search hit exactly over the glyphs.
+        const parts = cjk && w.symbols?.length ? w.symbols : [w];
+        for (const part of parts) {
+          if (!part.text || !part.text.trim()) continue;
+          words.push({
+            text: part.text.trim(),
+            rect: [part.bbox.x0 / scale, line.y0 / scale, part.bbox.x1 / scale, line.y1 / scale],
+          });
+        }
+      }
+      sheets.push({ page: index, words });
+    }
+    await worker.terminate();
+    worker = null;
+    done();
+    const total = sheets.reduce((sum, sheet) => sum + sheet.words.length, 0);
+    if (!total) { toast('文字を認識できませんでした', 'warn'); return; }
+    const result = await structural('/ocr-apply', { pages: sheets }, { label: '認識結果の埋め込み' });
+    if (result) toast(`${pages.length} ページから ${result.characters} 文字を認識しました。検索やマーカーが使えます`);
+  } catch (err) {
+    toast(`文字認識に失敗しました: ${err.message}（初回はインターネット接続が必要です）`, 'error');
+  } finally {
+    try { await worker?.terminate(); } catch { /* already gone */ }
+    done();
+  }
 }
 
-function closeEditor({ cancel = false } = {}) {
-  if (!editor) return;
-  const { box, id, isNew, isNote } = editor;
-  editor = null;
-  const value = box.value;
-  box.remove();
-  const annot = model.byId(id);
-  if (!annot) return;
-  if (cancel && isNew && !value) { model.removeAnnots([id]); return; }
-  if (isNew && !value.trim() && !isNote) { model.removeAnnots([id]); return; }
-  model.updateAnnots([id], isNote ? { contents: value } : { text: value, contents: value });
-  scheduleAutosave();
+function showHelp() {
+  const rows = [
+    ['文字を書き込む', '「ホーム」→「テキスト追加」→ 書きたい場所をクリックして、そのまま入力。枠の外をクリックで確定'],
+    ['書いた文字を直す', '文字をクリックするだけで、その場で編集できます。枠をドラッグすると移動'],
+    ['フォント・色・サイズ', '文字を選んだ状態で「ホーム」の「フォント」。ゴシック・明朝・丸ゴシック・教科書体・手書き風'],
+    ['マーカー・下線', '文字をなぞって選ぶと、その場にボタンが出ます。またはマーカーを選んでからなぞる'],
+    ['申込書などに記入', '「テキスト追加」で文字、「挿入」→「チェック」で ✓ や ○、「はんこ」「署名」で押印・サイン'],
+    ['元の文章を直す', '「ホーム」→「本文を編集」→ 直したい行をクリック'],
+    ['手書き', '「描画」タブのペン・蛍光ペン。ペン対応タブレットでは筆圧が効きます'],
+    ['ページの整理', '左のページ一覧でドラッグして並べ替え、右クリックで回転・削除・複製・結合'],
+    ['講義資料にメモ欄', '「ページ」→「余白を足す」でスライドの横にノート用スペース'],
+    ['スキャンを検索可能に', '「ツール」→「文字認識（OCR）」'],
+    ['保存', 'Ctrl+S で元のファイルに上書き。タイトルバーに ● が出ている間は未保存です'],
+    ['元に戻す', 'Ctrl+Z。ページの削除や墨消しの適用も戻せます'],
+  ];
+  const body = node('div', { class: 'help-body' }, [
+    node('table', {}, rows.map(([what, how]) => node('tr', {}, [node('td', { text: what }), node('td', { text: how })]))),
+    node('h3', { text: 'キーボード' }),
+    node('table', {}, Object.entries(SHORTCUTS).map(([key, label]) => node('tr', {}, [node('td', { text: key }), node('td', { text: label })]))),
+    node('h3', { text: 'プライバシー' }),
+    node('p', { text: 'PDFはこの端末のブラウザの中だけで処理され、サーバーには送信されません。インターネット接続が要るのは、最初の起動と、初めて文字認識（OCR）を使うときだけです。' }),
+  ]);
+  customDialog({ title: 'PDF Studio の使い方', wide: true, confirmLabel: '閉じる', hideCancel: true, build: () => body });
 }
 
-// ---------------------------------------------------------------- keyboard
+// ================================================================ commands
 
-const SHORTCUTS = {
-  v: 'select', h: 'highlight', u: 'underline', k: 'strikeout', t: 'freetext',
-  n: 'note', p: 'pen', e: 'eraser', l: 'lasso', i: 'line', r: 'square', c: 'circle',
+const tool = (name, label, icon, extra = {}) => ({
+  label, icon, run: () => selectTool(tools.tool === name && name !== 'select' ? 'select' : name),
+  active: () => tools.tool === name, enabled: hasDoc, ...extra,
+});
+const needsDoc = { enabled: hasDoc };
+const needsSelection = { enabled: () => model.store.selection.length > 0 };
+
+const commands = {
+  // clipboard
+  paste: { label: '貼り付け', icon: 'paste', key: 'Ctrl+V', run: () => { if (!pasteAnnots()) toast('貼り付けるものがありません。書き込みをコピーするか、画像をコピーして Ctrl+V', 'warn'); }, ...needsDoc },
+  cut: { label: '切り取り', icon: 'cut', key: 'Ctrl+X', run: cutSelection, ...needsSelection },
+  copy: { label: 'コピー', icon: 'copy', key: 'Ctrl+C', run: copySelection, ...needsSelection },
+  duplicate: { label: '複製', icon: 'duplicate', key: 'Ctrl+D', run: duplicateSelection, ...needsSelection },
+  remove: { label: '削除', icon: 'trash', key: 'Delete', run: deleteSelection, ...needsSelection },
+  // pointer
+  select: tool('select', '選択', 'select', { title: '選択（書き込みを選ぶ・動かす／文字を選ぶ）', key: 'Esc' }),
+  pan: tool('pan', '手のひら', 'pan', { title: '手のひら（ドラッグでページを動かす）' }),
+  // text
+  freetext: tool('freetext', 'テキスト追加', 'text', { short: 'テキスト\n追加', title: 'テキスト追加（クリックした場所に文字を書き込む）' }),
+  edittext: tool('edittext', '本文を編集', 'edittext', { short: '本文を\n編集', title: '本文を編集（PDFに元からある文字を書き換える）' }),
+  callout: tool('callout', '引き出し線', 'callout', { title: '引き出し線つきテキスト（指したい場所から引っぱる）' }),
+  note: tool('note', '付箋', 'note', { title: '付箋（クリックした場所にメモを貼る）' }),
+  // markup
+  highlight: tool('highlight', 'マーカー', 'highlight', { title: 'マーカー（文字をなぞる）' }),
+  underline: tool('underline', '下線', 'underline'),
+  strikeout: tool('strikeout', '取り消し線', 'strikeout'),
+  squiggly: tool('squiggly', '波線', 'squiggly'),
+  areaHighlight: tool('areaHighlight', '範囲マーカー', 'areahighlight', { title: '範囲マーカー（スキャンした文書や図に。囲んだ範囲を塗る）' }),
+  // drawing
+  pen: tool('pen', 'ペン', 'pen'),
+  marker: tool('marker', '蛍光ペン', 'marker', { title: '蛍光ペン（フリーハンド）' }),
+  eraser: tool('eraser', '消しゴム', 'eraser', { title: '消しゴム（手書きの線をなぞって消す）' }),
+  lasso: tool('lasso', '投げ縄', 'lasso', { title: '投げ縄（囲んだ中の書き込みをまとめて選ぶ）' }),
+  // shapes
+  line: tool('line', '直線', 'line'),
+  arrow: tool('arrow', '矢印', 'arrow'),
+  square: tool('square', '四角形', 'square'),
+  circle: tool('circle', '円・だ円', 'circle'),
+  polygon: tool('polygon', '多角形', 'polygon'),
+  polyline: tool('polyline', '折れ線', 'polyline'),
+  // inserts
+  image: { label: '画像', icon: 'image', title: '画像を挿入（写真・図・スクリーンショット。Ctrl+V でも貼れます）', run: () => $('#imageInput').click(), ...needsDoc },
+  signature: { label: '署名', icon: 'signature', title: '署名を入れる（手書き・入力・画像）', run: insertSignature, ...needsDoc },
+  hanko: { label: 'はんこ', icon: 'hanko', title: 'はんこを作って押す（認印・日付印・角印）', run: insertHanko, ...needsDoc },
+  stamp: tool('stamp', 'スタンプ', 'stamp', { title: 'スタンプ（承認済・社外秘など。自由な文言も可）' }),
+  date: { label: '日付', icon: 'date', title: '今日の日付を入れる', run: insertDate, ...needsDoc },
+  mark: tool('mark', 'チェック', 'check', { title: 'チェック・バツ・丸（申込書などの記入に。クリックした場所に置く）' }),
+  // pages
+  rotatecw: { label: '右に回転', icon: 'rotatecw', run: () => ops.rotatePages(90), ...needsDoc },
+  rotateccw: { label: '左に回転', icon: 'rotateccw', run: () => ops.rotatePages(-90), ...needsDoc },
+  rotateall: { label: '全ページ回転', icon: 'rotatecw', title: 'すべてのページを右に90°回転', run: () => ops.rotateAll(90), ...needsDoc },
+  pagedelete: { label: '削除', icon: 'pagedelete', title: 'ページを削除', run: ops.deletePages, ...needsDoc },
+  pagecopy: { label: '複製', icon: 'pagecopy', title: 'ページを複製', run: ops.duplicatePages, ...needsDoc },
+  pageblank: { label: '白紙を挿入', icon: 'pageblank', title: '今のページのあとに白紙を挿入', run: ops.insertBlank, ...needsDoc },
+  merge: { label: 'PDFを結合', icon: 'merge', short: 'PDFを\n結合', title: '別のPDFを今のページのあとに結合（複数選べます）', run: ops.pickMerge, ...needsDoc },
+  moveup: { label: '前へ移動', icon: 'moveup', run: () => ops.movePagesBy(-1), ...needsDoc },
+  movedown: { label: '後ろへ移動', icon: 'movedown', run: () => ops.movePagesBy(1), ...needsDoc },
+  extract: { label: '抜き出す', icon: 'pageextract', title: 'ページを抜き出して別のPDFにする', run: ops.extractPages, ...needsDoc },
+  split: { label: '分割', icon: 'split', title: 'PDFを複数のファイルに分割', run: ops.splitDocument, ...needsDoc },
+  margins: { label: '余白を足す', icon: 'margins', short: '余白を\n足す', title: 'ノート用の余白を足す（スライドの横にメモ欄を作る）', run: ops.addMargins, ...needsDoc },
+  handout: { label: '配布資料', icon: 'nup', title: '複数ページを1枚にまとめる（2/4/6/8/9面）', run: ops.handout, ...needsDoc },
+  toimages: { label: '画像にする', icon: 'image', title: 'ページを画像（PNG/JPEG）にする', run: ops.exportImages, ...needsDoc },
+  headerfooter: { label: 'ページ番号', icon: 'number', title: 'ページ番号・ヘッダー・フッターを入れる', run: ops.addHeaderFooter, ...needsDoc },
+  watermark: { label: '透かし', icon: 'watermark', run: ops.addWatermark, ...needsDoc },
+  bates: { label: '通し番号', icon: 'headerfooter', title: '通し番号（ベイツ番号）を振る', run: ops.addBates, ...needsDoc },
+  // review
+  comments: { label: 'コメント一覧', icon: 'comments', short: 'コメント\n一覧', title: '書き込みの一覧（返信・ステータス・絞り込み）', run: () => showRightPanel('comments') },
+  redact: tool('redact', '墨消し', 'redact', { title: '墨消しの指定（消したい場所を囲む。「適用」で実際に消える）' }),
+  redactsearch: { label: '検索して指定', icon: 'searchredact', title: '検索した語句すべてに墨消しを指定', run: ops.redactBySearch, ...needsDoc },
+  redactapply: { label: '墨消しを適用', icon: 'redactapply', title: '指定した墨消しを適用して、文字を実際に削除する', run: ops.applyRedactions, enabled: () => model.store.annots.some((a) => a.type === 'redact') },
+  scrub: { label: '隠れた情報を削除', icon: 'scrub', title: 'メタデータ・埋め込みファイルなど、見えない情報を削除', run: ops.scrubDocument, ...needsDoc },
+  compare: { label: '比較', icon: 'compare', title: '別の版と比べる', menu: true, ...needsDoc,
+    run: (e, button) => openMenu(button, [
+      { label: '違いを枠で示す', action: () => ops.startCompare('diff') },
+      { label: '2つの版を色分けして重ねたPDFを書き出す', action: () => ops.startCompare('overlay') },
+    ]) },
+  annotexport: { label: '書き込みを書き出す', icon: 'export', title: '書き込みの一覧を書き出す・取り込む', menu: true, ...needsDoc,
+    run: (e, button) => {
+      const has = model.store.annots.length;
+      openMenu(button, [
+        { label: `一覧をPDFにする（${has} 件）`, disabled: !has, action: () => ops.exportAnnots('summary') },
+        { label: 'Excel用のCSVにする', disabled: !has, action: () => ops.exportAnnots('csv') },
+        { label: 'Markdownにする（ノートアプリ用）', disabled: !has, action: () => ops.exportAnnots('markdown') },
+        { label: 'XFDFにする（書き込みだけを渡す）', disabled: !has, action: () => ops.exportAnnots('xfdf') },
+        '-',
+        { label: 'XFDFを取り込む…', action: () => $('#xfdfInput').click() },
+      ]);
+    } },
+  flatten: { label: '焼き付け', icon: 'flatten', title: '書き込みをページに焼き付けて、動かせなくする', run: ops.flattenAnnots, enabled: () => model.store.annots.length > 0 },
+  clearall: { label: 'すべて削除', icon: 'trash', title: '書き込みをすべて削除', run: ops.clearAnnots, enabled: () => model.store.annots.length > 0 },
+  markall: { label: '検索結果にマーカー', icon: 'highlight', title: '検索で見つかった箇所すべてにマーカーを引く', run: markAllHits, enabled: () => state.searchHits.length > 0 },
+  // view
+  zoomin: { label: '拡大', icon: 'zoomin', key: 'Ctrl++', run: () => viewer.nudgeZoom(1), ...needsDoc },
+  zoomout: { label: '縮小', icon: 'zoomout', key: 'Ctrl+−', run: () => viewer.nudgeZoom(-1), ...needsDoc },
+  fitwidth: { label: '幅に合わせる', icon: 'fitwidth', key: 'Ctrl+0', run: () => viewer.setZoom('fit-width'), active: () => viewer.zoomMode === 'fit-width', ...needsDoc },
+  fitpage: { label: '全体表示', icon: 'fitpage', run: () => viewer.setZoom('fit-page'), active: () => viewer.zoomMode === 'fit-page', ...needsDoc },
+  actual: { label: '100%', icon: 'actual', run: () => viewer.setZoom('1'), ...needsDoc },
+  thumbs: { label: 'ページ一覧', icon: 'thumbs', run: () => toggleSide('#leftPanel'), active: () => !$('#leftPanel').classList.contains('collapsed') },
+  sidepane: { label: '右パネル', icon: 'sidepane', title: 'コメント・プロパティのパネル', run: () => toggleSide('#rightPanel'), active: () => !$('#rightPanel').classList.contains('collapsed') },
+  theme: { label: 'ダークモード', icon: 'theme', run: toggleTheme, active: () => document.body.dataset.theme === 'dark' },
+  invert: { label: 'ページも暗く', icon: 'invert', title: 'ページの白黒を反転（夜に読むとき。保存されるPDFは変わりません）',
+    run: () => { setPref('invert', !getPref('invert')); viewer.setInvert(getPref('invert')); ribbon.refresh(); }, active: () => !!getPref('invert') },
+  fullscreen: { label: '全画面', icon: 'fullscreen', key: 'F11', run: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.()) },
+  speak: { label: '読み上げ', icon: 'speak', title: '今のページ（または選んだ文字）を読み上げる', run: readAloud, active: () => speaking, ...needsDoc },
+  find: { label: '検索', icon: 'search', key: 'Ctrl+F', run: () => { $('#searchInput').focus(); $('#searchInput').select(); }, ...needsDoc },
+  replace: { label: '置換', icon: 'replace', title: '本文を検索して置換', run: ops.searchReplaceText, ...needsDoc },
+  // tools
+  formfill: { label: 'フォーム入力', icon: 'form', short: 'フォーム\n入力', title: 'PDFの入力欄（フォーム）に入力', run: ops.showFields, ...needsDoc },
+  formmore: { label: 'フォームの操作', icon: 'more', menu: true, ...needsDoc,
+    run: (e, button) => openMenu(button, [
+      { label: '罫線から入力欄を自動で作る', action: ops.detectFields },
+      '-',
+      { label: '入力内容を書き出す（CSV）', action: () => ops.exportFields('csv') },
+      { label: '入力内容を書き出す（FDF）', action: () => ops.exportFields('fdf') },
+      { label: '入力内容を読み込む…', action: () => $('#fdfInput').click() },
+      { label: '複数の回答PDFを1枚のCSVに集計…', action: () => $('#collateInput').click() },
+    ]) },
+  distance: tool('measureDistance', '距離', 'ruler'),
+  area: tool('measureArea', '面積', 'area'),
+  angle: tool('measureAngle', '角度', 'angle'),
+  count: tool('count', 'カウント', 'count', { title: 'カウント（クリックした数を数える）' }),
+  scale: { label: '縮尺', icon: 'scale', title: '図面の縮尺を設定', run: startCalibration, ...needsDoc },
+  takeoff: { label: '集計', icon: 'order', title: '計測とカウントの集計', run: () => showRightPanel('takeoff') },
+  ocr: { label: '文字認識', icon: 'ocr', short: '文字認識\n(OCR)', title: 'スキャンした文書を文字認識して、検索・選択できるようにする', run: runOcr, ...needsDoc },
+  protect: { label: 'パスワード保護', icon: 'lock', title: 'パスワードを付けて書き出す', run: ops.protectDocument, ...needsDoc },
+  compress: { label: '軽くする', icon: 'compress', title: 'ファイルサイズを小さくする', run: ops.compressDocument, ...needsDoc },
+  a11y: { label: '点検', icon: 'accessibility', title: 'アクセシビリティを点検する', run: ops.runAccessibilityAudit, ...needsDoc },
+  readorder: { label: '読み上げ順', icon: 'order', title: '読み上げ順序を確認する', run: ops.showReadingOrder, ...needsDoc },
+  sigfield: { label: '電子署名欄', icon: 'signature', menu: true, ...needsDoc,
+    run: (e, button) => openMenu(button, [
+      { label: '署名欄を作る（相手に電子署名してもらう）', action: ops.addSignatureField },
+      { label: '電子署名の状態を確認', action: ops.showSignatureState },
+    ]) },
 };
 
-window.addEventListener('keydown', (e) => {
-  if (editor) return;
-  const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
-  const mod = e.ctrlKey || e.metaKey;
+const custom = (fn) => ({ custom: fn });
 
-  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveToDisk({ saveAs: e.shiftKey }); return; }
-  if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); chooseFile(); return; }
-  if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); $('#searchInput').focus(); return; }
-  if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); model.undo(); return; }
-  if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
-    e.preventDefault(); model.redo(); return;
-  }
-  if (mod && e.key.toLowerCase() === 'a' && !typing) {
-    e.preventDefault();
-    model.select(model.onPage(viewer.currentPage).map((a) => a.id));
-    return;
-  }
-  if (typing) return;
+const tabs = [
+  { id: 'home', label: 'ホーム', groups: [
+    { label: 'クリップボード', items: [{ big: 'paste' }, { col: ['cut', 'copy', 'duplicate'] }] },
+    { label: 'ツール', items: [{ big: 'select' }, { col: ['pan', 'find', 'remove'] }] },
+    { label: 'テキスト', items: [{ big: 'freetext' }, { big: 'edittext' }] },
+    { label: 'フォント', items: [custom(fontGroup)] },
+    { label: 'マーカー', items: [{ big: 'highlight' }, { col: ['underline', 'strikeout', 'squiggly'] }] },
+    { label: '記入', items: [{ col: ['mark', 'hanko', 'signature'] }, { col: ['note', 'image', 'date'] }] },
+    { label: '書式', items: [custom(styleGroup)] },
+  ] },
+  { id: 'insert', label: '挿入', groups: [
+    { label: 'テキスト', items: [{ big: 'freetext' }, { col: ['callout', 'note', 'date'] }] },
+    { label: '図形', items: [{ col: ['line', 'arrow', 'polyline'] }, { col: ['square', 'circle', 'polygon'] }] },
+    { label: '画像・印', items: [{ big: 'image' }, { big: 'hanko' }, { big: 'signature' }, { col: ['stamp', 'mark'] }] },
+    { label: 'ページに入れる', items: [{ col: ['headerfooter', 'watermark', 'bates'] }] },
+    { label: 'フォント', items: [custom(() => renderFontGroup(formatContext()))] },
+    { label: '書式', items: [custom(styleGroup)] },
+  ] },
+  { id: 'draw', label: '描画', groups: [
+    { label: 'ペン', items: [{ big: 'pen' }, { big: 'marker' }, { big: 'eraser' }] },
+    { label: '選択', items: [{ big: 'select' }, { col: ['lasso', 'remove'] }] },
+    { label: 'マーカー', items: [{ col: ['highlight', 'areaHighlight', 'underline'] }] },
+    { label: '書式', items: [custom(styleGroup)] },
+  ] },
+  { id: 'pages', label: 'ページ', groups: [
+    { label: '回転', items: [{ big: 'rotatecw' }, { col: ['rotateccw', 'rotateall'] }] },
+    { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }] },
+    { label: '結合・分割', items: [{ big: 'merge' }, { col: ['extract', 'split'] }] },
+    { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'headerfooter'] }] },
+    { label: '対象', items: [custom(() => h('div', { class: 'rhint', text: hasDoc()
+      ? `対象: ${describePages(targetPages())}。左のページ一覧で Ctrl / Shift を押しながら選ぶと、複数ページをまとめて操作できます。`
+      : 'PDFを開くと、ページの回転・削除・並べ替え・結合ができます。' }))] },
+  ] },
+  { id: 'review', label: '校閲', groups: [
+    { label: 'コメント', items: [{ big: 'comments' }, { col: ['note', 'callout', 'annotexport'] }] },
+    { label: 'マーカー', items: [{ col: ['highlight', 'underline', 'strikeout'] }, { col: ['squiggly', 'areaHighlight', 'markall'] }] },
+    { label: '墨消し（黒塗り）', items: [{ big: 'redact' }, { col: ['redactsearch', 'redactapply', 'scrub'] }] },
+    { label: '比較', items: [{ col: ['compare'] }] },
+    { label: '仕上げ', items: [{ col: ['flatten', 'clearall'] }] },
+    { label: '書式', items: [custom(styleGroup)] },
+  ] },
+  { id: 'view', label: '表示', groups: [
+    { label: 'ズーム', items: [{ big: 'fitwidth' }, { col: ['fitpage', 'actual'] }, { col: ['zoomin', 'zoomout'] }] },
+    { label: 'パネル', items: [{ col: ['thumbs', 'sidepane', 'comments'] }] },
+    { label: '見やすさ', items: [{ col: ['theme', 'invert', 'fullscreen'] }] },
+    { label: '読む', items: [{ big: 'speak' }, { col: ['find', 'pan'] }] },
+  ] },
+  { id: 'tools', label: 'ツール', groups: [
+    { label: '文字認識', items: [{ big: 'ocr' }] },
+    { label: 'フォーム', items: [{ big: 'formfill' }, { col: ['formmore', 'sigfield'] }] },
+    { label: '計測', items: [{ col: ['distance', 'area', 'angle'] }, { col: ['count', 'scale', 'takeoff'] }] },
+    { label: 'ファイル', items: [{ col: ['compress', 'protect', 'replace'] }] },
+    { label: 'アクセシビリティ', items: [{ col: ['a11y', 'readorder'] }] },
+    { label: '書式', items: [custom(styleGroup)] },
+  ] },
+];
+
+function fileMenu(anchor) {
+  const open = hasDoc();
+  openMenu(anchor, [
+    { label: '開く…', icon: 'open', key: 'Ctrl+O', action: chooseFile },
+    { label: '白紙から作る…', icon: 'newdoc', action: newBlank },
+    { label: '画像からPDFを作る…', icon: 'image', action: () => $('#imagePdfInput').click() },
+    '-',
+    { label: '上書き保存', icon: 'save', key: 'Ctrl+S', disabled: !open, action: () => saveToDisk() },
+    { label: '名前を付けて保存…', icon: 'saveas', key: 'Ctrl+Shift+S', disabled: !open, action: () => saveToDisk({ saveAs: true }) },
+    { label: 'コピーをダウンロード', icon: 'download', disabled: !open, action: downloadCopy },
+    { label: '印刷…', icon: 'print', key: 'Ctrl+P', disabled: !open, action: printDocument },
+    '-',
+    { heading: '書き出す' },
+    { label: 'ページを画像にする（PNG / JPEG）…', icon: 'image', disabled: !open, action: ops.exportImages },
+    { label: '文字だけを取り出す（テキストファイル）', icon: 'text2', disabled: !open, action: ops.exportText },
+    { label: '配布資料にする（複数ページを1枚に）…', icon: 'nup', disabled: !open, action: ops.handout },
+    { label: 'パスワードを付けて書き出す…', icon: 'lock', disabled: !open, action: ops.protectDocument },
+    { label: 'ファイルを軽くする…', icon: 'compress', disabled: !open, action: ops.compressDocument },
+    '-',
+    { label: '文書のプロパティ…', icon: 'info', disabled: !open, action: ops.documentProperties },
+    { label: '設定', icon: 'settings', action: () => showRightPanel('settings') },
+    { label: '使い方', icon: 'help', action: showHelp },
+  ]);
+}
+
+const ribbon = new Ribbon($('#ribbonTabs'), $('#ribbon'), { tabs, commands, onFile: fileMenu });
+
+function toggleTheme() {
+  const next = document.body.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.body.dataset.theme = next;
+  setPref('theme', next);
+  ribbon.refresh();
+}
+$('#btnTheme').addEventListener('click', toggleTheme);
+$('#btnHelp').addEventListener('click', showHelp);
+document.body.dataset.theme = getPref('theme') || 'light';
+viewer.setInvert(getPref('invert'));
+
+// ================================================================ keyboard
+
+function nudge(dx, dy) {
+  const annots = selectedAnnots().filter((a) => !a.flags?.locked);
+  if (!annots.length) return false;
+  const merge = `nudge:${annots.map((a) => a.id).join()}`;
+  for (const annot of annots) model.updateAnnots([annot.id], translated(annot, dx, dy), { merge });
+  endMergeWhenIdle(700);
+  return true;
+}
+
+window.addEventListener('keydown', (e) => {
+  if (document.querySelector('.dialog-backdrop')) return;
+  const target = e.target;
+  const typing = !!target.closest?.('input, textarea, select, [contenteditable]');
+  const mod = e.ctrlKey || e.metaKey;
+  const key = e.key.toLowerCase();
+
+  if (mod && key === 's') { e.preventDefault(); saveToDisk({ saveAs: e.shiftKey }); return; }
+  if (mod && key === 'o') { e.preventDefault(); chooseFile(); return; }
+  if (mod && key === 'p') { e.preventDefault(); printDocument(); return; }
+  if (mod && key === 'f') { e.preventDefault(); $('#searchInput').focus(); $('#searchInput').select(); return; }
+  if (typing || isComposing(e)) return;
+
+  if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+  if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
+  if (mod && key === 'a') { e.preventDefault(); selectAllOnPage(); return; }
+  if (mod && key === 'c') { if (!textSelectionActive() && copySelection()) e.preventDefault(); return; }
+  if (mod && key === 'x') { if (model.store.selection.length) { e.preventDefault(); cutSelection(); } return; }
+  if (mod && key === 'd') { e.preventDefault(); duplicateSelection(); return; }
+  if (mod && (key === '=' || key === '+' || key === ';')) { e.preventDefault(); viewer.nudgeZoom(1); return; }
+  if (mod && key === '-') { e.preventDefault(); viewer.nudgeZoom(-1); return; }
+  if (mod && key === '0') { e.preventDefault(); viewer.setZoom('fit-width'); return; }
+  if (mod) return;
 
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (model.store.selection.length) {
-      e.preventDefault();
-      model.removeAnnots(model.store.selection);
-      scheduleAutosave();
-    }
+    if (model.store.selection.length) { e.preventDefault(); deleteSelection(); }
     return;
   }
   if (e.key === 'Escape') {
-    for (const node of document.querySelectorAll('.order-mark')) node.remove();
+    for (const mark of document.querySelectorAll('.order-mark')) mark.remove();
+    const busyWith = tools.poly || tools.measuring || tools.calibrating;
     tools.cancelPoly();
     tools.cancelMeasure();
-    model.select([]);
+    if (busyWith) return;
+    if (model.store.selection.length) { model.select([]); return; }
+    if (tools.tool !== 'select') selectTool('select');
+    window.getSelection()?.removeAllRanges();
+    hideSelectionBar();
     return;
   }
-  if (e.key === 'Enter' && tools.measuring) { e.preventDefault(); tools.finishMeasure(); return; }
-  if (e.key === 'Enter' && tools.poly) { tools._finishPoly(); return; }
-
-  const tool = SHORTCUTS[e.key.toLowerCase()];
-  if (tool && !mod) { e.preventDefault(); selectTool(tool); }
+  if (e.key === 'Enter') {
+    if (tools.measuring) { e.preventDefault(); tools.finishMeasure(); return; }
+    if (tools.poly) { e.preventDefault(); tools._finishPoly(); return; }
+    const selection = selectedAnnots();
+    if (selection.length === 1 && (selection[0].type === 'freetext' || selection[0].type === 'note')) {
+      e.preventDefault();
+      startTextEdit(selection[0].id);
+    }
+    return;
+  }
+  if (e.key === 'F2') {
+    const selection = selectedAnnots();
+    if (selection.length === 1) { e.preventDefault(); startTextEdit(selection[0].id); }
+    return;
+  }
+  const step = e.shiftKey ? 10 : 1;
+  const arrows = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+  if (arrows[e.key] && model.store.selection.length) {
+    if (nudge(...arrows[e.key])) e.preventDefault();
+    return;
+  }
+  if (!hasDoc()) return;
+  if (e.key === 'PageDown') { e.preventDefault(); goToPage(viewer.currentPage + 1); return; }
+  if (e.key === 'PageUp') { e.preventDefault(); goToPage(viewer.currentPage - 1); return; }
+  if (e.key === 'Home') { e.preventDefault(); goToPage(0); return; }
+  if (e.key === 'End') { e.preventDefault(); goToPage(model.store.pages.length - 1); return; }
+  if (e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    // Scroll the document even when the focus is somewhere inert.
+    e.preventDefault();
+    const amount = e.key === ' ' ? stage.clientHeight * 0.85 * (e.shiftKey ? -1 : 1) : (e.key === 'ArrowDown' ? 60 : -60);
+    stage.scrollBy({ top: amount });
+  }
 });
 
+// Typing with a text box selected (not yet open) starts editing it, the way
+// a slide editor does — the first character is not lost.
+window.addEventListener('compositionstart', (e) => {
+  if (e.target.closest?.('input, textarea, [contenteditable]')) return;
+  const selection = selectedAnnots();
+  if (selection.length === 1 && selection[0].type === 'freetext') startTextEdit(selection[0].id);
+});
+
+// ================================================================ start
+
+selectTool('select');
+refreshAll();
 status('準備完了 — PDFを開いてください');
+document.addEventListener('pdfstudio:ready', () => {
+  // Have the default face ready before the first text box is typed in.
+  ensureFontLoaded({ family: 'gothic', size: 12 });
+});

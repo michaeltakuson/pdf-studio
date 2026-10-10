@@ -22,9 +22,13 @@ const PYODIDE_VERSION = '0.28.0';
 const PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 const WHEEL_NAME = 'pymupdf-1.28.2-cp313-abi3-pyodide_2025_0_wasm32.whl';
 const PY_MODULES = [
-  '__init__', 'common', 'annots', 'content', 'pages', 'export',
+  '__init__', 'common', 'textap', 'annots', 'content', 'pages', 'export',
   'forms', 'measure', 'compare', 'signing', 'accessibility', 'session', 'bridge',
 ];
+
+// Faces the PDF writer has been given so far (see ensureFonts below).
+const loadedFonts = new Set();
+let fontToolsPromise = null;
 
 function setBootStatus(text) {
   const node = document.getElementById('pyodideBootStatus');
@@ -56,7 +60,7 @@ const ready = new Promise((resolve) => { resolveReady = resolve; });
 installFetchShim();
 
 async function boot() {
-  setBootStatus('Python 実行環境を読み込んでいます…');
+  setBootStatus('実行環境を読み込んでいます…');
   const script = document.createElement('script');
   script.src = `${PYODIDE_CDN}pyodide.js`;
   await new Promise((resolve, reject) => {
@@ -185,6 +189,9 @@ async function route(url, init) {
   if (parts[0] === 'new' && method === 'POST') {
     return { action: 'new', payload: await readPayload(init) };
   }
+  if (parts[0] === 'from-images' && method === 'POST') {
+    return { action: 'from-images', payload: await readPayload(init) };
+  }
   if (parts[0] !== 'doc' || parts.length < 2) return null;
 
   const docId = parts[1];
@@ -194,8 +201,23 @@ async function route(url, init) {
   if (rest.length === 0 && method === 'GET') return { action: 'describe', payload: base };
   if (rest[0] === 'file' && method === 'GET') return { action: 'file', payload: base };
   if (rest[0] === 'download' && method === 'GET') return { action: 'download', payload: base };
+  if (rest[0] === 'download' && method === 'POST') {
+    return { action: 'download', payload: await readPayload(init, base) };
+  }
   if (rest[0] === 'annots' && method === 'POST') {
     return { action: 'annots.save', payload: await readPayload(init, base) };
+  }
+  const SIMPLE = {
+    undo: 'undo', compress: 'compress', nup: 'nup', split: 'split', images: 'images',
+    'extract-ranges': 'pages.extract-ranges', 'ocr-apply': 'ocr.apply',
+    outline: 'outline.set', metadata: 'metadata.set',
+  };
+  if (rest.length === 1 && SIMPLE[rest[0]] && method === 'POST') {
+    return { action: SIMPLE[rest[0]], payload: await readPayload(init, base) };
+  }
+  if (rest[0] === 'plain-text' && method === 'GET') return { action: 'text', payload: base };
+  if (rest[0] === 'page-text' && rest[1] !== undefined && method === 'GET') {
+    return { action: 'page.text', payload: { ...base, page: Number(rest[1]) } };
   }
   if (rest[0] === 'search' && method === 'POST') {
     return { action: 'search', payload: await readPayload(init, base) };
@@ -204,7 +226,7 @@ async function route(url, init) {
     return { action: 'flatten', payload: await readPayload(init, base) };
   }
   if (rest[0] === 'clear-annots' && method === 'POST') {
-    return { action: 'clear-annots', payload: base };
+    return { action: 'clear-annots', payload: await readPayload(init, base) };
   }
   if (rest[0] === 'export' && rest[1] && method === 'POST') {
     return { action: 'export', payload: await readPayload(init, { ...base, fmt: rest[1] }) };
@@ -239,7 +261,7 @@ async function route(url, init) {
     return { action: 'scrub', payload: await readPayload(init, base) };
   }
   if (rest[0] === 'optimise' && method === 'POST') {
-    return { action: 'optimise', payload: base };
+    return { action: 'optimise', payload: await readPayload(init, base) };
   }
   if (rest[0] === 'protect' && method === 'POST') {
     return { action: 'protect', payload: await readPayload(init, base) };
@@ -330,6 +352,10 @@ function installFetchShim() {
       const matched = await route(url, init);
       if (matched) {
         await ready;
+        if (Array.isArray(matched.payload?.annots)) await ensureFonts(matched.payload.fonts);
+        // Give the browser one frame to paint a progress indicator: the call
+        // below runs Python on this same thread and blocks until it returns.
+        await new Promise((resolve) => setTimeout(resolve, 0));
         const result = callBridge(matched.action, matched.payload);
         return resultToResponse(result);
       }
@@ -339,6 +365,35 @@ function installFetchShim() {
     }
     return realFetch(input, init);
   };
+}
+
+// ==================================================================== fonts
+
+/**
+ * Hand the PDF writer the font files it is about to embed, and the subsetter
+ * that cuts them down to the characters used.
+ *
+ * Both are fetched only when text is first saved — most sessions that only
+ * read or highlight never pay for them — and the browser cache makes every
+ * later use instant. If either fails (offline, say) saving still works: the
+ * writer falls back to a standard Japanese font reference.
+ */
+async function ensureFonts(files) {
+  const wanted = (files || []).filter((name) => /^[\w.-]+\.ttf$/.test(name) && !loadedFonts.has(name));
+  if (!wanted.length) return;
+  try {
+    pyodide.FS.mkdirTree('/fonts');
+    await Promise.all(wanted.map(async (name) => {
+      const response = await realFetch(new URL(`../vendor/fonts/${name}`, import.meta.url));
+      if (!response.ok) throw new Error(`${name}: ${response.status}`);
+      pyodide.FS.writeFile(`/fonts/${name}`, new Uint8Array(await response.arrayBuffer()));
+      loadedFonts.add(name);
+    }));
+    fontToolsPromise = fontToolsPromise || pyodide.loadPackage('fonttools');
+    await fontToolsPromise;
+  } catch (err) {
+    console.warn('フォントの準備に失敗しました（標準フォントで保存します）', err);
+  }
 }
 
 // ==================================================================== download

@@ -8,11 +8,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "webapp" / "py"))
 
 import pymupdf
 
-from backend import compare, forms, measure
+from pdfstudio import compare, forms, measure
 
 HERE = Path(__file__).parent
 

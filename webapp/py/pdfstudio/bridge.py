@@ -44,17 +44,33 @@ def _doc(payload: dict) -> session.Doc:
 
 def _describe(entry: session.Doc) -> dict:
     doc = entry.doc
+    items = annots.read_document(doc)
+    # What the browser is about to hold is, by definition, what is in the file.
+    entry.baseline = annots.baseline_of(items)
     return {
         "id": entry.id,
         "name": entry.name,
         "pageCount": doc.page_count,
         "pages": [page_info(page) for page in doc],
         "toc": doc.get_toc(simple=True),
-        "annots": annots.read_document(doc),
+        "annots": items,
         "metadata": doc.metadata or {},
         "isEncrypted": doc.is_encrypted,
         "needsPass": doc.needs_pass,
+        "undoDepth": len(entry.snapshots),
     }
+
+
+def _sync(entry: session.Doc, payload: dict, required: bool = False) -> int:
+    """Bring the file's markup up to date with what the browser sent.
+
+    Every operation that rewrites the document does this first, so nothing the
+    user drew a moment ago is lost when the page under it changes.
+    """
+    items = payload.get("annots")
+    if items is None and not required:
+        return 0
+    return annots.write_document(entry.doc, items or [], entry.baseline)
 
 
 def _reload(entry: session.Doc, backup: str | None = None) -> dict:
@@ -106,8 +122,7 @@ def describe_document(payload: dict) -> dict:
 
 def save_annots(payload: dict) -> dict:
     entry = _doc(payload)
-    count = annots.write_document(entry.doc, payload.get("annots") or [])
-    entry.commit()
+    count = _sync(entry, payload, required=True)
     return {"written": count}
 
 
@@ -141,8 +156,7 @@ def search(payload: dict) -> dict:
 
 def flatten(payload: dict) -> dict:
     entry = _doc(payload)
-    annots.write_document(entry.doc, payload.get("annots") or [])
-    entry.commit()
+    _sync(entry, payload, required=True)
     backup = entry.snapshot("before-flatten")
     entry.doc.bake(annots=True, widgets=bool(payload.get("widgets", False)))
     entry.commit()
@@ -152,8 +166,8 @@ def flatten(payload: dict) -> dict:
 def clear_annots(payload: dict) -> dict:
     entry = _doc(payload)
     backup = entry.snapshot("before-clear")
-    removed = len(annots.read_document(entry.doc))
-    annots.write_document(entry.doc, [])
+    removed = len(entry.baseline)
+    annots.write_document(entry.doc, [], entry.baseline)
     entry.commit()
     result = _reload(entry, backup)
     result["removed"] = removed
@@ -174,12 +188,12 @@ def page_action(payload: dict) -> dict:
     entry = _doc(payload)
     action = payload.get("action")
     targets = [int(p) for p in (payload.get("pages") or [])]
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     backup = entry.snapshot(f"before-{action}")
     try:
         if action == "rotate":
-            pages.rotate(entry.doc, targets, int(payload.get("degrees", 90)))
+            pages.rotate(entry.doc, targets or list(range(entry.doc.page_count)),
+                         int(payload.get("degrees", 90)))
         elif action == "delete":
             pages.delete(entry.doc, targets)
         elif action == "duplicate":
@@ -195,6 +209,17 @@ def page_action(payload: dict) -> dict:
             pages.crop(entry.doc, targets, payload["rect"])
         elif action == "reset-crop":
             pages.reset_crop(entry.doc, targets)
+        elif action == "margins":
+            pages.add_margins(
+                entry.doc, targets or None,
+                left=float(payload.get("left", 0)), top=float(payload.get("top", 0)),
+                right=float(payload.get("right", 0)), bottom=float(payload.get("bottom", 0)),
+            )
+        elif action == "reorder":
+            order = [int(p) for p in payload.get("order") or []]
+            if sorted(order) != list(range(entry.doc.page_count)):
+                raise ApiError(400, "ページの並びが正しくありません")
+            entry.doc.select(order)
         else:
             raise ApiError(404, f"未対応のページ操作: {action}")
     except ApiError:
@@ -207,10 +232,15 @@ def page_action(payload: dict) -> dict:
 
 def merge(payload: dict) -> dict:
     entry = _doc(payload)
-    data = _bytes(payload.get("data"))
+    _sync(entry, payload)
     backup = entry.snapshot("before-merge")
     try:
-        added = pages.merge(entry.doc, data, payload.get("at"))
+        added = 0
+        sources = payload.get("files") or [{"data": payload.get("data")}]
+        at = payload.get("at")
+        for source in sources:
+            count = pages.merge(entry.doc, _bytes(source.get("data")), None if at is None else int(at) + added)
+            added += count
     except Exception as exc:
         raise ApiError(400, f"結合できませんでした: {exc}")
     entry.commit()
@@ -222,8 +252,7 @@ def merge(payload: dict) -> dict:
 def stamp_pages(payload: dict) -> dict:
     entry = _doc(payload)
     kind = payload.get("kind")
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     backup = entry.snapshot(f"before-{kind}")
     try:
         if kind == "watermark":
@@ -258,8 +287,7 @@ def stamp_pages(payload: dict) -> dict:
 
 def redact_apply(payload: dict) -> dict:
     entry = _doc(payload)
-    annots.write_document(entry.doc, payload.get("annots") or [])
-    entry.commit()
+    _sync(entry, payload, required=True)
     backup = entry.snapshot("before-redaction")
     result = pages.apply_redactions(entry.doc, images=bool(payload.get("images", True)))
     if payload.get("scrub"):
@@ -272,8 +300,7 @@ def redact_apply(payload: dict) -> dict:
 
 def redact_search(payload: dict) -> dict:
     entry = _doc(payload)
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     marked = pages.search_and_mark_redactions(
         entry.doc, payload.get("query", ""),
         fill=payload.get("fill", "#000000"), overlay=payload.get("overlay", ""),
@@ -311,6 +338,10 @@ def text_blocks(payload: dict) -> dict:
         raise ApiError(404, "ページがありません")
     page = entry.doc[page_index]
     return {
+        "lines": [
+            {**b, "pageRect": b["rect"], "rect": to_view(page, {"rect": b["rect"]})["rect"]}
+            for b in content.find_text_lines(page)
+        ],
         "blocks": [
             {**b, "rect": to_view(page, {"rect": b["rect"]})["rect"]}
             for b in content.find_text_blocks(page)
@@ -324,25 +355,30 @@ def text_blocks(payload: dict) -> dict:
 
 def text_replace(payload: dict) -> dict:
     entry = _doc(payload)
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     backup = entry.snapshot("before-text-edit")
     page = entry.doc[int(payload["page"])]
+    # `pageRect` and `origin` come straight from text.blocks, already in the
+    # page's own frame; a bare `rect` is what the reader sees.
+    rect = payload.get("pageRect") or rect_to_page(page, payload["rect"])
     content.replace_text(
-        page, rect_to_page(page, payload["rect"]), payload.get("text", ""),
+        page, rect, payload.get("text", ""),
         size=float(payload.get("size", 11)),
         colour=payload.get("colour", "#000000"),
         align=int(payload.get("align", 0)),
         background=payload.get("background"),
+        origin=payload.get("origin"),
+        serif=bool(payload.get("serif")),
+        bold=bool(payload.get("bold")),
     )
+    content.subset(entry.doc)
     entry.commit()
     return _reload(entry, backup)
 
 
 def text_search_replace(payload: dict) -> dict:
     entry = _doc(payload)
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     backup = entry.snapshot("before-search-replace")
     count = content.search_replace(
         entry.doc, payload.get("query", ""), payload.get("replacement", ""),
@@ -398,8 +434,7 @@ def fields_list(payload: dict) -> dict:
 
 def fields_add(payload: dict) -> dict:
     entry = _doc(payload)
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     page = entry.doc[int(payload.get("page", 0))]
     try:
         created = forms.create_field(page, payload)
@@ -473,8 +508,7 @@ def sign(payload: dict) -> dict:
     kind = payload.get("kind", "typed")
     page_index = int(payload.get("page", 0))
     rect = payload.get("rect")
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     backup = entry.snapshot("before-signature")
     page = entry.doc[page_index]
     try:
@@ -518,8 +552,7 @@ def accessibility_audit(payload: dict) -> dict:
 
 def accessibility_autotag(payload: dict) -> dict:
     entry = _doc(payload)
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     backup = entry.snapshot("before-autotag")
     report = accessibility.autotag(entry.doc, language=payload.get("language", "ja-JP"))
     entry.commit()
@@ -551,6 +584,111 @@ def accessibility_order(payload: dict) -> dict:
     return {"blocks": accessibility.reading_order(entry.doc, page_index)}
 
 
+def undo_structural(payload: dict) -> dict:
+    """Step back over the last operation that rewrote the document itself."""
+    entry = _doc(payload)
+    label = entry.restore()
+    if label is None:
+        raise ApiError(400, "これ以上は元に戻せません")
+    out = _describe(entry)
+    out["restored"] = label
+    return out
+
+
+def from_images(payload: dict) -> dict:
+    files = [(f.get("filename") or "image", _bytes(f.get("data"))) for f in payload.get("files") or []]
+    if not files:
+        raise ApiError(400, "画像が選ばれていません")
+    try:
+        data = pages.images_to_pdf(files)
+    except ValueError as exc:
+        raise ApiError(400, str(exc))
+    stem = files[0][0].rsplit(".", 1)[0]
+    entry = session.create(f"{stem}.pdf", data)
+    return _describe(entry)
+
+
+def compress_document(payload: dict) -> dict:
+    entry = _doc(payload)
+    _sync(entry, payload)
+    backup = entry.snapshot("before-compress")
+    report = pages.compress(
+        entry.doc, dpi=int(payload.get("dpi", 150)), quality=int(payload.get("quality", 75)),
+    )
+    entry.commit()
+    out = _reload(entry, backup)
+    out.update(report)
+    out["actual"] = len(entry.bytes())
+    return out
+
+
+def outline_set(payload: dict) -> dict:
+    entry = _doc(payload)
+    try:
+        pages.set_outline(entry.doc, payload.get("toc") or [])
+    except Exception as exc:
+        raise ApiError(400, f"しおりを保存できませんでした: {exc}")
+    return {"toc": entry.doc.get_toc(simple=True)}
+
+
+def metadata_set(payload: dict) -> dict:
+    entry = _doc(payload)
+    metadata = dict(entry.doc.metadata or {})
+    for key in ("title", "author", "subject", "keywords"):
+        if key in payload:
+            metadata[key] = payload.get(key) or ""
+    entry.doc.set_metadata(metadata)
+    return {"metadata": entry.doc.metadata or {}}
+
+
+def ocr_apply(payload: dict) -> dict:
+    """Lay recognised words under the page image as invisible, searchable text.
+
+    The recognition itself runs in the browser (tesseract.js); this only
+    receives the words and where they were found.
+    """
+    entry = _doc(payload)
+    _sync(entry, payload)
+    backup = entry.snapshot("before-ocr")
+    font = content.body_font()
+    total = 0
+    for sheet in payload.get("pages") or []:
+        index = int(sheet.get("page", 0))
+        if index < 0 or index >= entry.doc.page_count:
+            continue
+        page = entry.doc[index]
+        writer = pymupdf.TextWriter(page.rect)
+        for word in sheet.get("words") or []:
+            text = (word.get("text") or "").strip()
+            box = word.get("rect")
+            if not text or not box:
+                continue
+            x0, y0, x1, y1 = rect_to_page(page, box)
+            size = max(4.0, (y1 - y0) * 0.82)
+            natural = font.text_length(text, size) or 1
+            # Stretch each word to the width it has in the picture, so a
+            # selection drawn over the scan lines up with the letters.
+            try:
+                writer.append(pymupdf.Point(x0, y1 - (y1 - y0) * 0.2), text, font=font, fontsize=size * min(1.6, max(0.5, (x1 - x0) / natural)))
+                total += len(text)
+            except Exception:
+                continue
+        writer.write_text(page, render_mode=3)
+    content.subset(entry.doc)
+    entry.commit()
+    out = _reload(entry, backup)
+    out["characters"] = total
+    return out
+
+
+def page_text(payload: dict) -> dict:
+    entry = _doc(payload)
+    index = int(payload.get("page", 0))
+    if index < 0 or index >= entry.doc.page_count:
+        raise ApiError(404, "ページがありません")
+    return {"text": entry.doc[index].get_text()}
+
+
 def close_document(payload: dict) -> dict:
     session.close(payload.get("docId"))
     return {"ok": True}
@@ -578,6 +716,7 @@ def _export(payload: dict):
 
 def _pages_extract(payload: dict):
     entry = _doc(payload)
+    _sync(entry, payload)
     data = pages.extract(entry.doc, [int(p) for p in payload.get("pages") or []])
     stem = entry.name.rsplit(".", 1)[0]
     return f"{stem}-抽出.pdf", "application/pdf", data
@@ -591,8 +730,7 @@ def _protect(payload: dict):
         permissions=payload.get("permissions"),
     )
     stem = entry.name.rsplit(".", 1)[0]
-    if payload.get("annots") is not None:
-        annots.write_document(entry.doc, payload["annots"])
+    _sync(entry, payload)
     data = entry.doc.tobytes(garbage=3, deflate=True, **options)
     return f"{stem}-保護.pdf", "application/pdf", data
 
@@ -649,12 +787,62 @@ def _takeoff_csv(payload: dict):
 
 def _file_bytes(payload: dict):
     entry = _doc(payload)
-    return f"{entry.name}", "application/pdf", entry.bytes()
+    return f"{entry.name}", "application/pdf", annots.view_bytes(entry.doc)
+
+
+def _stem(entry: session.Doc) -> str:
+    return entry.name.rsplit(".", 1)[0]
+
+
+def _nup(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    data = pages.nup(entry.doc, int(payload.get("perSheet", 2)), border=bool(payload.get("border", True)))
+    return f"{_stem(entry)}-{int(payload.get('perSheet', 2))}up.pdf", "application/pdf", data
+
+
+def _split(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    try:
+        data = pages.split(entry.doc, _stem(entry), ranges=payload.get("ranges", ""),
+                           every=int(payload.get("every") or 0))
+    except ValueError as exc:
+        raise ApiError(400, str(exc))
+    return f"{_stem(entry)}-分割.zip", "application/zip", data
+
+
+def _images(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    return pages.to_images(entry.doc, _stem(entry), payload.get("pages"),
+                           dpi=int(payload.get("dpi", 150)), fmt=payload.get("format", "png"))
+
+
+def _text(payload: dict):
+    entry = _doc(payload)
+    return f"{_stem(entry)}.txt", "text/plain", ("\ufeff" + pages.to_text(entry.doc)).encode("utf-8")
+
+
+def _extract_ranges(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    try:
+        groups = pages.parse_ranges(payload.get("ranges", ""), entry.doc.page_count)
+    except ValueError as exc:
+        raise ApiError(400, str(exc))
+    wanted = [index for group in groups for index in group]
+    out = pymupdf.open()
+    for index in wanted:
+        out.insert_pdf(entry.doc, from_page=index, to_page=index)
+    data = out.tobytes(garbage=3, deflate=True)
+    out.close()
+    return f"{_stem(entry)}-抽出.pdf", "application/pdf", data
 
 
 def _download(payload: dict):
     entry = _doc(payload)
-    entry.commit()
+    _sync(entry, payload)
     name = entry.name if entry.name.lower().endswith(".pdf") else f"{entry.name}.pdf"
     return name, "application/pdf", entry.bytes()
 
@@ -699,6 +887,13 @@ _JSON_ROUTES = {
     "accessibility.alt": accessibility_alt,
     "accessibility.order": accessibility_order,
     "close": close_document,
+    "undo": undo_structural,
+    "from-images": from_images,
+    "compress": compress_document,
+    "outline.set": outline_set,
+    "metadata.set": metadata_set,
+    "ocr.apply": ocr_apply,
+    "page.text": page_text,
 }
 
 _BINARY_ROUTES = {
@@ -711,6 +906,11 @@ _BINARY_ROUTES = {
     "takeoff.csv": _takeoff_csv,
     "file": _file_bytes,
     "download": _download,
+    "nup": _nup,
+    "split": _split,
+    "images": _images,
+    "text": _text,
+    "pages.extract-ranges": _extract_ranges,
 }
 
 

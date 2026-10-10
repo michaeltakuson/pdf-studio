@@ -88,6 +88,211 @@ def reset_crop(doc: pymupdf.Document, pages: list[int]) -> None:
         page.set_cropbox(page.mediabox)
 
 
+def add_margins(doc: pymupdf.Document, pages: list[int] | None, *, left=0.0, top=0.0,
+                right=0.0, bottom=0.0) -> int:
+    """Grow the paper around the content: room to write notes beside a slide.
+
+    Only the page boxes change, so the content, its links and every annotation
+    stay exactly where they were relative to each other.
+    """
+    count = 0
+    for index in _target_pages(doc, pages):
+        page = doc[index]
+        box = pymupdf.Rect(page.mediabox)
+        crop = pymupdf.Rect(page.cropbox)
+        # Margins are given as the reader sees the page; the boxes live in the
+        # unrotated page, so turn them back first.
+        sides = [left, top, right, bottom]
+        turns = (page.rotation // 90) % 4
+        l, t, r, b = sides[turns:] + sides[:turns]
+        # PDF space has y pointing up: "top" is the high y edge.
+        grown = pymupdf.Rect(box.x0 - l, box.y0 - b, box.x1 + r, box.y1 + t)
+        doc.xref_set_key(page.xref, "MediaBox", f"[{grown.x0:.2f} {grown.y0:.2f} {grown.x1:.2f} {grown.y1:.2f}]")
+        if crop != box:
+            doc.xref_set_key(page.xref, "CropBox", "null")
+        count += 1
+    return count
+
+
+def nup(doc: pymupdf.Document, per_sheet: int = 2, *, border: bool = True) -> bytes:
+    """Several pages per sheet of A4 — handouts and exam-revision printouts."""
+    source = pymupdf.open("pdf", doc.tobytes())
+    try:
+        try:
+            source.bake()  # markup is not carried by show_pdf_page, so burn it in
+        except Exception:
+            pass
+        layouts = {2: (842, 595, 2, 1), 4: (595, 842, 2, 2), 6: (595, 842, 2, 3),
+                   8: (842, 595, 4, 2), 9: (595, 842, 3, 3)}
+        width, height, cols, rows = layouts.get(int(per_sheet), layouts[2])
+        margin, gap = 24, 10
+        cell_w = (width - 2 * margin - (cols - 1) * gap) / cols
+        cell_h = (height - 2 * margin - (rows - 1) * gap) / rows
+        out = pymupdf.open()
+        sheet = None
+        for index in range(source.page_count):
+            slot = index % (cols * rows)
+            if slot == 0:
+                sheet = out.new_page(width=width, height=height)
+            col, row = slot % cols, slot // cols
+            x = margin + col * (cell_w + gap)
+            y = margin + row * (cell_h + gap)
+            cell = pymupdf.Rect(x, y, x + cell_w, y + cell_h)
+            src = source[index].rect
+            scale = min(cell.width / src.width, cell.height / src.height)
+            w, h = src.width * scale, src.height * scale
+            placed = pymupdf.Rect(cell.x0 + (cell.width - w) / 2, cell.y0 + (cell.height - h) / 2,
+                                  cell.x0 + (cell.width + w) / 2, cell.y0 + (cell.height + h) / 2)
+            sheet.show_pdf_page(placed, source, index)
+            if border:
+                sheet.draw_rect(placed, color=(0.6, 0.6, 0.6), width=0.5)
+        data = out.tobytes(garbage=3, deflate=True)
+        out.close()
+        return data
+    finally:
+        source.close()
+
+
+def parse_ranges(text: str, page_count: int) -> list[list[int]]:
+    """"1-3, 5, 8-" -> [[0,1,2],[4],[7..last]]. Raises ValueError on nonsense."""
+    groups = []
+    cleaned = str(text)
+    for wide, plain in (("、", ","), ("，", ","), ("ー", "-"), ("－", "-"), ("〜", "-"), ("~", "-"), ("～", "-")):
+        cleaned = cleaned.replace(wide, plain)
+    cleaned = cleaned.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    for part in cleaned.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                first, last = part.split("-", 1)
+                start = int(first) if first.strip() else 1
+                end = int(last) if last.strip() else page_count
+            else:
+                start = end = int(part)
+        except ValueError:
+            raise ValueError(f"ページ範囲が読み取れません: {part}（例: 1-3, 5, 8-）")
+        if start < 1 or end > page_count or start > end:
+            raise ValueError(f"ページ範囲が正しくありません: {part}（全 {page_count} ページ）")
+        groups.append(list(range(start - 1, end)))
+    if not groups:
+        raise ValueError("ページ範囲を入力してください（例: 1-3, 5, 8-）")
+    return groups
+
+
+def split(doc: pymupdf.Document, stem: str, *, ranges: str = "", every: int = 0) -> bytes:
+    """Split into several PDFs, returned as one zip."""
+    import io
+    import zipfile
+
+    if every and every > 0:
+        groups = [list(range(i, min(i + every, doc.page_count))) for i in range(0, doc.page_count, every)]
+    else:
+        groups = parse_ranges(ranges, doc.page_count)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for group in groups:
+            part = pymupdf.open()
+            part.insert_pdf(doc, from_page=group[0], to_page=group[-1])
+            label = f"{group[0] + 1}" if len(group) == 1 else f"{group[0] + 1}-{group[-1] + 1}"
+            archive.writestr(f"{stem}_p{label}.pdf", part.tobytes(garbage=3, deflate=True))
+            part.close()
+    return buffer.getvalue()
+
+
+def to_images(doc: pymupdf.Document, stem: str, pages: list[int] | None, *,
+              dpi: int = 150, fmt: str = "png") -> tuple[str, str, bytes]:
+    """Render pages (markup included) to pictures. One page comes back as the
+    picture itself, several as a zip."""
+    import io
+    import zipfile
+
+    targets = _target_pages(doc, pages)
+    fmt = "jpg" if fmt in ("jpg", "jpeg") else "png"
+    media = "image/jpeg" if fmt == "jpg" else "image/png"
+
+    def render(index: int) -> bytes:
+        pix = doc[index].get_pixmap(dpi=int(dpi), alpha=False)
+        return pix.tobytes("jpeg", jpg_quality=90) if fmt == "jpg" else pix.tobytes("png")
+
+    if len(targets) == 1:
+        return f"{stem}_p{targets[0] + 1}.{fmt}", media, render(targets[0])
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        digits = len(str(doc.page_count))
+        for index in targets:
+            archive.writestr(f"{stem}_p{str(index + 1).zfill(digits)}.{fmt}", render(index))
+    return f"{stem}_画像.zip", "application/zip", buffer.getvalue()
+
+
+def to_text(doc: pymupdf.Document) -> str:
+    parts = []
+    for page in doc:
+        parts.append(f"===== {page.number + 1} ページ =====\n{page.get_text().strip()}")
+    return "\n\n".join(parts) + "\n"
+
+
+def images_to_pdf(files: list[tuple[str, bytes]]) -> bytes:
+    """One A4 page per picture, turned to suit the picture's shape."""
+    out = pymupdf.open()
+    for name, data in files:
+        try:
+            pix = pymupdf.Pixmap(data)
+        except Exception as exc:
+            raise ValueError(f"{name} は画像として読めませんでした") from exc
+        landscape = pix.width > pix.height
+        width, height = (842, 595) if landscape else (595, 842)
+        page = out.new_page(width=width, height=height)
+        margin = 18
+        page.insert_image(pymupdf.Rect(margin, margin, width - margin, height - margin),
+                          stream=data, keep_proportion=True)
+    data = out.tobytes(garbage=3, deflate=True)
+    out.close()
+    return data
+
+
+def compress(doc: pymupdf.Document, *, dpi: int = 150, quality: int = 75) -> dict:
+    """Make the file smaller by resampling pictures — where the weight is."""
+    before = len(doc.tobytes())
+    images = False
+    try:
+        doc.rewrite_images(dpi_threshold=int(dpi * 1.2), dpi_target=int(dpi), quality=int(quality))
+        images = True
+    except Exception:
+        pass
+    try:
+        doc.subset_fonts()
+    except Exception:
+        pass
+    after = len(doc.tobytes(garbage=4, deflate=True))
+    return {"before": before, "after": after, "saved": max(0, before - after), "images": images}
+
+
+def set_outline(doc: pymupdf.Document, toc: list) -> None:
+    clean = []
+    for level, title, page in toc:
+        clean.append([max(1, int(level)), str(title), max(1, min(doc.page_count, int(page)))])
+    # Levels may only step down one at a time; flatten anything that jumps.
+    previous = 0
+    for row in clean:
+        row[0] = min(row[0], previous + 1)
+        previous = row[0]
+    doc.set_toc(clean)
+
+
+def _font():
+    from . import content
+
+    return content.body_font()
+
+
+def _subset(doc):
+    from . import content
+
+    content.subset(doc)
+
+
 # ---------------------------------------------------------------- overlays
 
 
@@ -98,7 +303,7 @@ def _target_pages(doc: pymupdf.Document, pages: list[int] | None) -> list[int]:
 def watermark(doc: pymupdf.Document, text: str, *, pages=None, colour="#c0c0c0",
               size=48, opacity=0.25, angle=45) -> int:
     count = 0
-    font = pymupdf.Font("japan")
+    font = _font()
     for index in _target_pages(doc, pages):
         page = doc[index]
         rect = page.rect
@@ -115,13 +320,14 @@ def watermark(doc: pymupdf.Document, text: str, *, pages=None, colour="#c0c0c0",
                    pymupdf.Matrix(angle)),
         )
         count += 1
+    _subset(doc)
     return count
 
 
 def header_footer(doc: pymupdf.Document, *, header="", footer="", pages=None,
                   size=9, colour="#555555", margin=28) -> int:
     """Place running text, substituting {page} and {pages}."""
-    font = pymupdf.Font("japan")
+    font = _font()
     targets = _target_pages(doc, pages)
     for index in targets:
         page = doc[index]
@@ -136,13 +342,14 @@ def header_footer(doc: pymupdf.Document, *, header="", footer="", pages=None,
                 pymupdf.Point((rect.width - width) / 2, y), filled, font=font, fontsize=size
             )
         writer.write_text(page, color=hex_to_rgb(colour))
+    _subset(doc)
     return len(targets)
 
 
 def bates(doc: pymupdf.Document, *, prefix="", start=1, digits=6, suffix="",
           size=9, colour="#333333", margin=28) -> int:
     """Sequential numbering across the document — the legal-discovery standard."""
-    font = pymupdf.Font("japan")
+    font = _font()
     for offset, page in enumerate(doc):
         label = f"{prefix}{str(start + offset).zfill(digits)}{suffix}"
         rect = page.rect
@@ -153,6 +360,7 @@ def bates(doc: pymupdf.Document, *, prefix="", start=1, digits=6, suffix="",
             label, font=font, fontsize=size,
         )
         writer.write_text(page, color=hex_to_rgb(colour))
+    _subset(doc)
     return doc.page_count
 
 
