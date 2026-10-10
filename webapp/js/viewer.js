@@ -266,7 +266,12 @@ export class Viewer extends EventTarget {
     for (const item of annotations) {
       if (item.subtype !== 'Link' || !item.rect) continue;
       if (!item.url && !item.dest && !item.unsafeUrl) continue;
-      const [x0, y0, x1, y1] = viewport.convertToViewportRectangle(item.rect);
+      // PDF user space to the page as shown (the viewport matrix carries the
+      // flip to a top-left origin and any page rotation).
+      const [a, b, c, d, e, f] = viewport.transform;
+      const point = (x, y) => [a * x + c * y + e, b * x + d * y + f];
+      const [x0, y0] = point(item.rect[0], item.rect[1]);
+      const [x1, y1] = point(item.rect[2], item.rect[3]);
       const node = document.createElement('a');
       node.className = 'pdf-link';
       node.style.left = `${(Math.min(x0, x1) / view.width) * 100}%`;
