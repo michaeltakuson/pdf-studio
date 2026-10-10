@@ -2561,8 +2561,11 @@ window.addEventListener('keydown', (e) => {
     tools.cancelPoly();
     tools.cancelMeasure();
     if (busyWith) return;
-    if (model.store.selection.length) { model.select([]); return; }
+    // One press lets go of everything: the selection and the tool in hand.
+    const hadSelection = model.store.selection.length > 0;
+    if (hadSelection) model.select([]);
     if (tools.tool !== 'select') selectTool('select');
+    if (hadSelection) return;
     window.getSelection()?.removeAllRanges();
     hideSelectionBar();
     return;
