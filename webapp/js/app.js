@@ -2744,7 +2744,13 @@ function fileMenu(anchor) {
 
 const ribbon = new Ribbon($('#ribbonTabs'), $('#ribbon'), {
   tabs, commands, onFile: fileMenu,
-  collapsed: (() => { try { return localStorage.getItem('pdfstudio.ribbon') === 'collapsed'; } catch { return false; } })(),
+  // On a phone the ribbon would take a fifth of the screen: start folded
+  // there (a tab still shows it) unless the user has chosen otherwise.
+  collapsed: (() => {
+    let stored = null;
+    try { stored = localStorage.getItem('pdfstudio.ribbon'); } catch { /* storage blocked */ }
+    return stored ? stored === 'collapsed' : window.innerWidth < 600;
+  })(),
   onCollapse: (collapsed) => {
     try { localStorage.setItem('pdfstudio.ribbon', collapsed ? 'collapsed' : 'open'); } catch { /* storage blocked */ }
     onLayoutChange();

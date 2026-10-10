@@ -207,6 +207,8 @@ body[data-theme="dark"] .tab.file { color: #10203a; }
   appearance: none; border: none; background: transparent; color: var(--text-dim);
   cursor: pointer; margin-left: auto; align-self: center; display: flex;
   padding: 4px 8px; border-radius: 5px; flex: none;
+  /* Stays in reach when the tabs scroll sideways on a narrow screen. */
+  position: sticky; right: 0; background: var(--surface-2);
 }
 .tab-fold:hover { background: var(--surface-3); color: var(--text); }
 .tabs.folded .tab.active { background: transparent; border-color: transparent; }
