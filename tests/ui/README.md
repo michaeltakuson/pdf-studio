@@ -11,6 +11,7 @@
 | `documents.js` | マーカーの色・元に戻す・定型文・スライドショー・ページ操作・墨消し・パスワード付きPDF |
 | `arrange-touch-spread.js` | 整列・指でのドラッグ・見開き |
 | `files-and-saving.js` | ドロップ・画像の貼り付け・ファイルへの保存・自動保存・印刷・書き出し |
+| `ribbon-fold-and-search-list.js` | リボンの折りたたみ（Ctrl+F1・ダブルクリック・一時表示）・検索結果の一覧 |
 | `edit-while-loading.js` | エンジンの準備中に書き込み、準備完了後に引き継がれること |
 
 ## 使い方

@@ -623,6 +623,7 @@ async function buildFormLayer() {
       control.addEventListener('blur', commit);
       control.addEventListener('input', () => { state.unsaved = true; clearTimeout(formTimer); formTimer = setTimeout(commit, 1500); });
       control.addEventListener('keydown', (event) => {
+        if (isAppShortcut(event)) { commit(); return; }
         event.stopPropagation();
         if (event.key === 'Enter' && !isComposing(event) && control.tagName === 'INPUT') control.blur();
       });
@@ -758,6 +759,12 @@ function commitText(id, isNew, text, size, { keepSelected = false } = {}) {
   refreshAll();
 }
 
+/** Save, print, open, find, fold the ribbon: these work even while typing. */
+function isAppShortcut(event) {
+  return (event.ctrlKey || event.metaKey) && !event.altKey && !isComposing(event)
+    && (['s', 'p', 'o', 'f'].includes(event.key.toLowerCase()) || event.key === 'F1');
+}
+
 function flushEditing() {
   if (state.editor) state.editor.commit({ keepSelected: true });
   if (noteEditor) closeNoteEditor();
@@ -817,6 +824,7 @@ function openNoteEditor(annot, view, isNew) {
       event.preventDefault();
       closeNoteEditor();
     }
+    if (isAppShortcut(event)) return;
     event.stopPropagation();
   });
   for (const type of ['pointerdown', 'pointerup', 'dblclick', 'contextmenu', 'paste', 'copy', 'cut', 'keyup']) {
@@ -2146,11 +2154,11 @@ function showSearchList() {
       const row = h('button', { class: `hit-row${index === state.searchIndex ? ' current' : ''}`, onclick: () => { goToHit(index); close(); } });
       const context = h('span', { class: 'ctx' });
       const text = hit.context || query;
-      const at = text.toLowerCase().indexOf(query.toLowerCase());
+      const [at, length] = hit.contextAt || [text.toLowerCase().indexOf(query.toLowerCase()), query.length];
       if (at >= 0) {
         // Keep the hit in view: lead with a little of what comes before it.
         const from = Math.max(0, at - 16);
-        context.append(`${from ? '…' : ''}${text.slice(from, at)}`, h('mark', { text: text.slice(at, at + query.length) }), text.slice(at + query.length));
+        context.append(`${from ? '…' : ''}${text.slice(from, at)}`, h('mark', { text: text.slice(at, at + length) }), text.slice(at + length));
       } else {
         context.textContent = text;
       }
@@ -2680,7 +2688,15 @@ function fileMenu(anchor) {
   ]);
 }
 
-const ribbon = new Ribbon($('#ribbonTabs'), $('#ribbon'), { tabs, commands, onFile: fileMenu });
+const ribbon = new Ribbon($('#ribbonTabs'), $('#ribbon'), {
+  tabs, commands, onFile: fileMenu,
+  collapsed: (() => { try { return localStorage.getItem('pdfstudio.ribbon') === 'collapsed'; } catch { return false; } })(),
+  onCollapse: (collapsed) => {
+    try { localStorage.setItem('pdfstudio.ribbon', collapsed ? 'collapsed' : 'open'); } catch { /* storage blocked */ }
+    onLayoutChange();
+  },
+});
+function toggleRibbon() { ribbon.setCollapsed(!ribbon.collapsed); }
 
 function toggleTheme() {
   const next = document.body.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -2715,6 +2731,7 @@ window.addEventListener('keydown', (e) => {
   if (mod && key === 'o') { e.preventDefault(); chooseFile(); return; }
   if (mod && key === 'p') { e.preventDefault(); printDocument(); return; }
   if (mod && key === 'f') { e.preventDefault(); $('#searchInput').focus(); $('#searchInput').select(); return; }
+  if (mod && e.key === 'F1') { e.preventDefault(); toggleRibbon(); return; }
   if (typing || isComposing(e)) return;
 
   if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }

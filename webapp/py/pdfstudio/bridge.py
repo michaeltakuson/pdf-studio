@@ -155,8 +155,21 @@ def search(payload: dict) -> dict:
                 # The words around the hit, for a list of results to read
                 # through. Past a few hundred nobody reads the list.
                 box = quad.rect
-                around = pymupdf.Rect(box.x0 - 150, box.y0 + 1, box.x1 + 150, box.y1 - 1) & page.rect
-                hit["context"] = " ".join(page.get_textbox(around).split())[:90]
+                limit = page.rect
+                # Only the middle of the line's height, so that the lines
+                # above and below do not leak in.
+                inset = box.height * 0.3
+                top, bottom = box.y0 + inset, box.y1 - inset
+                def squeeze(text):
+                    # One line, single spaces, but keep a space at either end:
+                    # it is what separates the hit from its neighbours.
+                    flat = " ".join(text.split())
+                    return (" " if text[:1].isspace() and flat else "") + flat + (" " if text[-1:] == " " and flat else "")
+                before = squeeze(page.get_textbox(pymupdf.Rect(limit.x0, top, box.x0, bottom)))[-24:]
+                word = " ".join(page.get_textbox(pymupdf.Rect(box.x0, top, box.x1, bottom)).split()) or needle
+                after = squeeze(page.get_textbox(pymupdf.Rect(box.x1, top, limit.x1, bottom)))[:70].rstrip()
+                hit["context"] = before + word + after
+                hit["contextAt"] = [len(before), len(word)]
             hits.append(hit)
     return {"hits": hits, "relaxed": relaxed_used}
 

@@ -270,6 +270,8 @@ def main() -> int:
     found = bridge.dispatch("search", {"docId": opened["id"], "query": "redaction"})["json"]["hits"]
     failures += not check(len(found) >= 2 and all("redaction" in h.get("context", "").lower() for h in found),
                           f"検索結果に前後の文が付く（{found[0].get('context', '')[:40]!r}）")
+    marked = [h["context"][h["contextAt"][0]:h["contextAt"][0] + h["contextAt"][1]].lower() for h in found]
+    failures += not check(all("redaction" in m and len(m) <= 12 for m in marked), f"どこがヒットしたかも分かる {marked[:2]}")
     doc.close()
 
     # ---------------------------------------------------------------- editing body text

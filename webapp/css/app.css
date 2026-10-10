@@ -202,6 +202,18 @@ input[type="range"] { accent-color: var(--accent); }
 .tab.file { background: var(--accent); color: #fff; border-radius: 5px; top: -3px; margin-right: 6px; padding: 4px 14px; }
 body[data-theme="dark"] .tab.file { color: #10203a; }
 .tab.file:hover { filter: brightness(1.1); }
+.tab-fold {
+  appearance: none; border: none; background: transparent; color: var(--text-dim);
+  font: inherit; font-size: 12px; cursor: pointer; margin-left: auto; align-self: center;
+  padding: 3px 9px; border-radius: 5px; flex: none;
+}
+.tab-fold:hover { background: var(--surface-3); color: var(--text); }
+.tabs.folded .tab.active { background: transparent; border-color: transparent; }
+.ribbon.collapsed { display: none; }
+.ribbon.collapsed.peek {
+  display: flex; position: fixed; left: 0; right: 0; z-index: 40;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, .22);
+}
 
 .ribbon {
   display: flex;

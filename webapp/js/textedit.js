@@ -232,6 +232,11 @@ export class TextEditor {
       const converting = event.isComposing || this.composing || event.keyCode === 229;
       if (!converting && event.key === 'Escape') { event.preventDefault(); this.commit({ keepSelected: true }); }
       if (!converting && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); this.commit(); }
+      // Save, print, open, find and folding the ribbon belong to the app even
+      // in the middle of a sentence; otherwise the browser would take them
+      // (Ctrl+S offering to save the web page, for one).
+      if (!converting && (event.ctrlKey || event.metaKey) && !event.altKey
+        && (['s', 'p', 'o', 'f'].includes(event.key.toLowerCase()) || event.key === 'F1')) return;
       event.stopPropagation();
     });
     for (const type of ['keyup', 'keypress', 'copy', 'cut']) {

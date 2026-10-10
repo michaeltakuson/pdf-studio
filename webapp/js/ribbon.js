@@ -15,7 +15,9 @@ function el(tag, className, text) {
 }
 
 export class Ribbon {
-  constructor(tabsEl, bodyEl, { tabs, commands, onFile }) {
+  constructor(tabsEl, bodyEl, { tabs, commands, onFile, collapsed = false, onCollapse = () => {} }) {
+    this.collapsed = false;
+    this.onCollapse = onCollapse;
     this.tabsEl = tabsEl;
     this.bodyEl = bodyEl;
     this.tabs = tabs;
@@ -30,9 +32,29 @@ export class Ribbon {
       const button = el('button', 'tab', tab.label);
       button.dataset.tab = tab.id;
       button.setAttribute('role', 'tab');
-      button.addEventListener('click', () => this.setTab(tab.id));
+      button.addEventListener('click', () => {
+        // Folded away, a tab shows its buttons over the page until one is used.
+        const reopen = this.collapsed && !(this.peeking && this.active === tab.id);
+        if (this.collapsed && !reopen) { this._peek(false); return; }
+        this.setTab(tab.id);
+        if (reopen) this._peek(true);
+      });
+      button.addEventListener('dblclick', () => this.setCollapsed(!this.collapsed));
       tabsEl.append(button);
     }
+    const fold = el('button', 'tab-fold');
+    fold.addEventListener('click', () => this.setCollapsed(!this.collapsed));
+    tabsEl.append(fold);
+    this.foldEl = fold;
+    // A peeked ribbon goes away once it has been used, or on a click elsewhere.
+    document.addEventListener('pointerdown', (event) => {
+      if (this.peeking && !bodyEl.contains(event.target) && !tabsEl.contains(event.target)
+        && !event.target.closest?.('.menu, .popover, dialog')) this._peek(false);
+    }, true);
+    bodyEl.addEventListener('click', (event) => {
+      if (this.peeking && event.target.closest('button') && !event.target.closest('[aria-haspopup]')) setTimeout(() => this._peek(false), 0);
+    });
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && this.peeking) this._peek(false); });
     // A mouse wheel over the ribbon scrolls it sideways when it does not fit.
     bodyEl.addEventListener('wheel', (event) => {
       if (bodyEl.scrollWidth <= bodyEl.clientWidth || event.ctrlKey) return;
@@ -45,6 +67,31 @@ export class Ribbon {
     window.addEventListener('resize', hint);
     this._hint = hint;
     this.setTab(this.active);
+    this.setCollapsed(collapsed, true);
+  }
+
+  /** Fold the ribbon away to give the page more room (Ctrl+F1, or double-click a tab). */
+  setCollapsed(collapsed, silent = false) {
+    this.collapsed = !!collapsed;
+    this._peek(false);
+    this.bodyEl.classList.toggle('collapsed', this.collapsed);
+    this.tabsEl.classList.toggle('folded', this.collapsed);
+    this.foldEl.textContent = this.collapsed ? '▾' : '▴';
+    this.foldEl.title = this.collapsed ? 'リボンを常に表示（Ctrl+F1）' : 'リボンを折りたたんで紙面を広く（Ctrl+F1）';
+    this.foldEl.setAttribute('aria-label', this.foldEl.title);
+    if (!this.collapsed) this._hint();
+    if (!silent) this.onCollapse(this.collapsed);
+  }
+
+  _peek(on) {
+    this.peeking = !!on && this.collapsed;
+    this.bodyEl.classList.toggle('peek', this.peeking);
+    if (this.peeking) {
+      this.bodyEl.style.top = `${this.tabsEl.getBoundingClientRect().bottom}px`;
+      this._hint();
+    } else {
+      this.bodyEl.style.top = '';
+    }
   }
 
   setTab(id) {
