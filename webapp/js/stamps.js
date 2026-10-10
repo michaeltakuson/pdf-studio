@@ -412,6 +412,8 @@ export function hankoDialog({ defaultName = '' } = {}) {
     text: '済',
     colour: '#d7261e',
   };
+  // People press the same seal every day: start from the last one made.
+  try { Object.assign(spec, JSON.parse(localStorage.getItem('pdfstudio.hanko.v1') || '{}'), { date: spec.date }); } catch { /* first use */ }
   const canvas = node('canvas', { width: 420, height: 420 });
   const redraw = async () => {
     canvas.width = 420; canvas.height = 420;
@@ -441,6 +443,7 @@ export function hankoDialog({ defaultName = '' } = {}) {
       fields.preset.hidden = spec.kind !== 'box';
       redraw();
     };
+    kind.value = spec.kind;
     kind.addEventListener('change', () => { spec.kind = kind.value; sync(); });
     row('kind', '種類', kind);
     row('name', '名前', text('name', '例: 山田'));
@@ -474,6 +477,7 @@ export function hankoDialog({ defaultName = '' } = {}) {
       await redraw();
       const cropped = trim(canvas, 4);
       if (!cropped) return false;
+      try { localStorage.setItem('pdfstudio.hanko.v1', JSON.stringify(spec)); } catch { /* storage blocked */ }
       // Real seals are small: about 12 mm across for a name seal.
       const height = spec.kind === 'box' ? 26 : spec.kind === 'date' ? 42 : 34;
       return {

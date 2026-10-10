@@ -134,6 +134,8 @@ const P = {
   study: '<rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M6.500 10h4" /><rect x="12" y="8.500" width="6" height="3" fill="currentColor" stroke="none"/><path d="M6.500 14.500h11"/>',
   translate: '<path d="M4 6h9M8.500 4v2M6 6c.5 3 2.500 5.500 5.500 7M11 6c-.5 3-2.500 5.500-6 7"/><path d="m13 20 3.500-9 3.500 9M14.200 17h4.600"/>',
   web: '<circle cx="12" cy="12" r="8.500"/><path d="M3.500 12h17M12 3.500c3 3 3 14 0 17M12 3.500c-3 3-3 14 0 17"/>',
+  snippet: '<rect x="3" y="4" width="18" height="16" rx="1.500"/><path d="M7 9h10M7 13h10M7 17h5"/><path d="M16.500 15.500l1.500 1.500 2.500-3" />',
+  slideshow: '<rect x="3" y="4" width="18" height="12" rx="1"/><path d="M12 16v4M8 20h8"/><path d="m10.500 7.500 4 2.500-4 2.500z" fill="currentColor"/>',
   text2: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
 };
 

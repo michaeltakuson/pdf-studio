@@ -385,10 +385,18 @@ export class Viewer extends EventTarget {
     this.setZoom(String(next));
   }
 
+  /** The pages on or near the screen. */
+  visibleViews() {
+    return this._visibleViews();
+  }
+
   _visibleViews() {
     const top = this.stage.scrollTop - 400;
     const bottom = top + this.stage.clientHeight + 800;
     return this.pageViews.filter((view) => {
+      // A page that is not laid out (hidden in slideshow mode) reports a
+      // position of zero and would otherwise always count as on screen.
+      if (!view.wrap.offsetParent) return false;
       const y = view.wrap.offsetTop;
       return y + view.wrap.offsetHeight >= top && y <= bottom;
     });
@@ -398,6 +406,7 @@ export class Viewer extends EventTarget {
     const mid = this.stage.scrollTop + this.stage.clientHeight / 3;
     let best = 0;
     for (const view of this.pageViews) {
+      if (!view.wrap.offsetParent) continue;   // hidden (slideshow shows one page)
       if (view.wrap.offsetTop <= mid) best = view.index;
       else break;
     }

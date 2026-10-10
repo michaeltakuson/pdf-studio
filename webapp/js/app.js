@@ -20,6 +20,7 @@ import { MARKUP_TOOLS, translated } from './tools.js';
 import { signatureDialog, hankoDialog, normaliseImage, fileToDataUrl } from './stamps.js';
 import * as ops from './docops.js';
 import { keyFor, saveDraft, loadDraft, clearDraft, pruneDrafts } from './drafts.js';
+import { rememberFile, recentFiles, forgetFile, SNIPPET_FIELDS, loadSnippets, saveSnippets } from './recent.js';
 
 for (const holder of document.querySelectorAll('[data-icon]')) {
   holder.innerHTML = iconSvg(holder.dataset.icon, holder.classList.contains('small') || holder.classList.contains('sb-btn') ? 16 : 18);
@@ -58,6 +59,7 @@ async function adopt(data, { handle = null, message = null, draftKey = null, kee
   state.unsaved = false;
   afterReload();
   refreshAll();
+  if (handle) rememberFile(handle).then(showRecent);
   if (previous && previous !== data.id) {
     fetch(`/api/doc/${previous}/close`, { method: 'POST' }).catch(() => {});
   }
@@ -259,6 +261,37 @@ async function pdfFromImages(files) {
   }
 }
 
+/** The list of recently opened files on the start screen. */
+async function showRecent() {
+  const holder = $('#recentFiles');
+  const list = await recentFiles();
+  holder.textContent = '';
+  holder.hidden = !list.length;
+  if (!list.length) return;
+  holder.append(h('h2', { text: '最近使ったファイル' }));
+  for (const item of list) {
+    const when = new Date(item.at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' });
+    holder.append(h('button', {
+      class: 'recent-item', title: `${item.name} を開く`,
+      html: iconSvg('pageblank', 17),
+      onclick: () => openRecent(item),
+    }, [h('span', { class: 'name', text: item.name }), h('span', { class: 'when', text: when })]));
+  }
+}
+
+async function openRecent(item) {
+  try {
+    // The browser shows its own "allow this site to view the file?" prompt.
+    if (await item.handle.queryPermission({ mode: 'read' }) !== 'granted'
+      && await item.handle.requestPermission({ mode: 'read' }) !== 'granted') return;
+    await openFile(await item.handle.getFile(), '', item.handle);
+  } catch {
+    toast(`${item.name} を開けませんでした（移動または削除された可能性があります）`, 'warn');
+    await forgetFile(item.name);
+    showRecent();
+  }
+}
+
 $('#fileInput').addEventListener('change', (e) => {
   if (e.target.files[0]) openFile(e.target.files[0]);
   e.target.value = '';
@@ -320,14 +353,31 @@ window.addEventListener('drop', async (e) => {
 
 // ================================================================ rendering
 
+// Pages whose overlay is out of date but which are not on screen. Redrawing
+// every page of a long, heavily marked-up document on each change made
+// dragging one shape stutter; off-screen pages are caught up as they scroll in.
+const stalePages = new Set();
+
+function drawOverlay(view) {
+  const editingId = state.editor?.meta?.id || null;
+  renderPage(view, model.onPage(view.index), model.store.selection,
+    { editingId, scale: viewer.scale, mask: state.study ? state.revealed : null });
+  stalePages.delete(view.index);
+}
+
 function refreshOverlays() {
   overlaysQueued = false;
-  const editingId = state.editor?.meta?.id || null;
+  const near = new Set(viewer.visibleViews().map((view) => view.index));
   for (const view of viewer.pageViews) {
-    renderPage(view, model.onPage(view.index), model.store.selection,
-      { editingId, scale: viewer.scale, mask: state.study ? state.revealed : null });
+    if (near.has(view.index)) drawOverlay(view);
+    else stalePages.add(view.index);
   }
   placeSelectionBar();
+}
+
+function catchUpOverlays() {
+  if (!stalePages.size) return;
+  for (const view of viewer.visibleViews()) if (stalePages.has(view.index)) drawOverlay(view);
 }
 
 // Redrawing is coalesced to once a frame. Besides being cheaper during a
@@ -423,7 +473,10 @@ function refreshPanels() {
   $('#docName').textContent = name;
   $('#docName').title = name;
   const saveState = $('#saveState');
-  saveState.textContent = !hasDoc() ? (state.preview ? '編集機能を準備中…' : '') : state.unsaved ? '● 未保存の変更があります' : '保存済み';
+  const auto = getPref('autosave') && state.fileHandle;
+  saveState.textContent = !hasDoc() ? (state.preview ? '編集機能を準備中…' : '')
+    : state.unsaved ? (auto ? '● 変更あり（まもなく自動保存）' : '● 未保存の変更があります')
+      : (auto ? '保存済み（自動保存オン）' : '保存済み');
   saveState.classList.toggle('dirty', state.unsaved);
   document.title = hasDoc() ? `${state.unsaved ? '● ' : ''}${name} — PDF Studio` : 'PDF Studio';
 
@@ -543,7 +596,7 @@ function endMergeWhenIdle(delay = 1200) {
 }
 
 model.subscribe((reason) => {
-  if (!['selection', 'document', 'saved', 'derived'].includes(reason)) { state.unsaved = true; scheduleDraft(); }
+  if (!['selection', 'document', 'saved', 'derived'].includes(reason)) { state.unsaved = true; scheduleDraft(); scheduleAutosave(); }
   if (state.editor && !state.editor.meta.isLine) {
     const annot = model.byId(state.editor.meta.id);
     if (annot) state.editor.applyStyle(annot); else { state.editor.discard(); state.editor = null; }
@@ -570,7 +623,7 @@ viewer.addEventListener('page', (e) => {
   if (tools.tool === 'edittext') loadTextLines(e.detail.page);
   try { if (hasDoc()) localStorage.setItem(positionKey(), String(e.detail.page)); } catch { /* storage blocked */ }
 });
-stage.addEventListener('scroll', () => { hideSelectionBar(); scheduleBar(); }, { passive: true });
+stage.addEventListener('scroll', () => { hideSelectionBar(); scheduleBar(); catchUpOverlays(); }, { passive: true });
 
 // ================================================================ text boxes
 
@@ -981,6 +1034,7 @@ async function saveToDisk({ saveAs = false } = {}) {
     clearTimeout(draftTimer);
     clearDraft(state.draftKey);
     if (handle) { try { state.draftKey = keyFor(await handle.getFile()); } catch { state.draftKey = null; } }
+    if (handle) rememberFile(handle);
     return true;
   } catch (err) {
     toast(`保存に失敗しました: ${err.message}${/NoModificationAllowed|locked|InvalidState/i.test(String(err.name)) ? '（ファイルが他のアプリで開かれていないか確認してください）' : ''}`, 'error');
@@ -1251,6 +1305,192 @@ async function insertDate() {
   if (values) addTextBox(options[values.format]);
 }
 
+// ================================================================ snippets
+
+async function editSnippets() {
+  const saved = loadSnippets();
+  const values = await formDialog({
+    title: '定型文を登録する',
+    intro: '申込書などによく書く内容を登録しておくと、「定型文」からワンクリックで入れられます。このブラウザの中だけに保存されます。',
+    fields: SNIPPET_FIELDS.map(([key, label]) => ({ key, label, value: saved[key] || '' })),
+    confirmLabel: '保存',
+    wide: true,
+  });
+  if (values) { saveSnippets(values); toast('定型文を保存しました'); }
+}
+
+function snippetMenu(anchor) {
+  const saved = loadSnippets();
+  const entries = SNIPPET_FIELDS
+    .filter(([key]) => (saved[key] || '').trim())
+    .map(([key, label]) => ({ label: `${label}: ${saved[key].length > 22 ? `${saved[key].slice(0, 22)}…` : saved[key]}`, action: () => addTextBox(saved[key].trim()) }));
+  openMenu(anchor, [
+    ...(entries.length ? entries : [{ note: 'まだ登録がありません。氏名・住所などを登録しておくと、ここから1クリックで入れられます。' }]),
+    '-',
+    { label: '定型文を登録・編集…', icon: 'settings', action: editSnippets },
+  ]);
+}
+
+// ================================================================ slideshow
+
+const present = { on: false, index: 0, zoom: 'fit-width', bar: null, laser: null, timer: 0 };
+
+function showSlide(index) {
+  present.index = Math.max(0, Math.min(viewer.pageViews.length - 1, index));
+  for (const view of viewer.pageViews) view.wrap.classList.toggle('showing', view.index === present.index);
+  viewer.currentPage = present.index;
+  viewer.setZoom('fit-page', { keep: false });
+  stage.scrollTop = 0;
+  drawOverlay(viewer.pageViews[present.index]);
+  present.bar.textContent = `${present.index + 1} / ${viewer.pageViews.length}　← → で移動 ・ マウスを押している間はポインター ・ Esc で終了`;
+  present.bar.classList.add('show');
+  clearTimeout(present.timer);
+  present.timer = setTimeout(() => present.bar.classList.remove('show'), 2600);
+}
+
+async function startSlideshow() {
+  if (!viewer.pageViews.length || present.on) return;
+  flushEditing();
+  selectTool('select');
+  model.select([]);
+  hideSelectionBar();
+  present.on = true;
+  present.zoom = viewer.zoomMode;
+  const start = viewer.currentPage;
+  present.bar = document.createElement('div');
+  present.bar.className = 'present-bar';
+  document.body.append(present.bar);
+  document.body.classList.add('present');
+  try { await document.documentElement.requestFullscreen?.(); } catch { /* still works windowed */ }
+  // Let the browser finish resizing before fitting the page to the screen.
+  setTimeout(() => showSlide(start), 120);
+}
+
+function stopSlideshow() {
+  if (!present.on) return;
+  present.on = false;
+  const at = present.index;
+  document.body.classList.remove('present');
+  present.bar?.remove();
+  present.laser?.remove();
+  present.laser = null;
+  for (const view of viewer.pageViews) view.wrap.classList.remove('showing');
+  if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+  setTimeout(() => { viewer.setZoom(present.zoom, { keep: false }); viewer.scrollToPage(at); refreshAll(); }, 120);
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (present.on && !document.fullscreenElement) stopSlideshow();
+  else if (present.on) setTimeout(() => showSlide(present.index), 120);
+});
+window.addEventListener('resize', () => { if (present.on) showSlide(present.index); });
+
+// In a slideshow every key and click is navigation; nothing reaches the tools.
+window.addEventListener('keydown', (e) => {
+  if (!present.on) return;
+  e.stopImmediatePropagation();
+  const forward = ['ArrowRight', 'ArrowDown', 'PageDown', ' ', 'Enter'];
+  const back = ['ArrowLeft', 'ArrowUp', 'PageUp', 'Backspace'];
+  if (e.key === 'Escape') { e.preventDefault(); stopSlideshow(); }
+  else if (forward.includes(e.key)) { e.preventDefault(); showSlide(present.index + 1); }
+  else if (back.includes(e.key)) { e.preventDefault(); showSlide(present.index - 1); }
+  else if (e.key === 'Home') showSlide(0);
+  else if (e.key === 'End') showSlide(viewer.pageViews.length - 1);
+}, true);
+
+for (const type of ['pointerdown', 'pointermove', 'pointerup', 'mousedown', 'click', 'dblclick', 'contextmenu', 'wheel']) {
+  stage.addEventListener(type, (e) => {
+    if (!present.on) return;
+    e.stopImmediatePropagation();
+    if (type === 'contextmenu' || type === 'wheel' || type === 'mousedown') e.preventDefault();
+    if (type === 'wheel') {
+      // One notch, one slide — however many events the wheel sends for it.
+      const now = Date.now();
+      if (now - (present.wheel || 0) > 350) { present.wheel = now; showSlide(present.index + (e.deltaY > 0 ? 1 : -1)); }
+    } else if (type === 'contextmenu') {
+      showSlide(present.index - 1);
+    } else if (type === 'pointerdown' && e.button === 0) {
+      present.down = { x: e.clientX, y: e.clientY, at: Date.now(), moved: false };
+      present.laser = document.createElement('div');
+      present.laser.className = 'laser';
+      present.laser.style.left = `${e.clientX}px`;
+      present.laser.style.top = `${e.clientY}px`;
+      document.body.append(present.laser);
+    } else if (type === 'pointermove' && present.laser) {
+      present.laser.style.left = `${e.clientX}px`;
+      present.laser.style.top = `${e.clientY}px`;
+      if (present.down && Math.hypot(e.clientX - present.down.x, e.clientY - present.down.y) > 6) present.down.moved = true;
+    } else if (type === 'pointerup') {
+      present.laser?.remove();
+      present.laser = null;
+      // A quick press without movement turns the page; a held or dragged
+      // press was pointing at something.
+      if (present.down && !present.down.moved && Date.now() - present.down.at < 350 && e.button === 0) showSlide(present.index + 1);
+      present.down = null;
+    }
+  }, true);
+}
+
+// ================================================================ autosave to the file
+
+let autosaveTimer;
+let autosaving = false;
+
+/**
+ * With autosave on, changes are written back to the opened file by
+ * themselves, the way a word processor does it. Off by default: it
+ * overwrites the original, and that should be something the user chose.
+ */
+function scheduleAutosave() {
+  clearTimeout(autosaveTimer);
+  if (!getPref('autosave') || !state.fileHandle || !hasDoc()) return;
+  autosaveTimer = setTimeout(runAutosave, 20000);
+}
+
+async function runAutosave() {
+  if (!getPref('autosave') || !state.unsaved || !state.fileHandle || autosaving) return;
+  // Not in the middle of typing, a dialog or another operation.
+  if (state.editor || noteEditor || state.working || tools.pending || document.querySelector('.dialog-backdrop')) { scheduleAutosave(); return; }
+  const handle = state.fileHandle;
+  try {
+    if (await handle.queryPermission({ mode: 'readwrite' }) !== 'granted') return; // needs a click; Ctrl+S will ask
+  } catch { return; }
+  autosaving = true;
+  $('#saveState').textContent = '自動保存中…';
+  try {
+    const { blob } = await finishedPdf();
+    if (state.fileHandle !== handle) return;
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    state.unsaved = false;
+    model.markClean();
+    clearDraft(state.draftKey);
+    try { state.draftKey = keyFor(await handle.getFile()); } catch { state.draftKey = null; }
+  } catch (err) {
+    console.warn('autosave failed', err);
+  } finally {
+    autosaving = false;
+    refreshPanels();
+  }
+}
+
+function toggleAutosave() {
+  const next = !getPref('autosave');
+  setPref('autosave', next);
+  if (next && !window.showSaveFilePicker) {
+    toast('このブラウザでは自動保存を使えません（Chrome か Edge で使えます）', 'warn');
+  } else if (next) {
+    toast(state.fileHandle
+      ? '自動保存をオンにしました。変更は少し後に、元のファイルへ自動で上書きされます'
+      : '自動保存をオンにしました。「開く」から開いたファイル（または一度保存したファイル）に自動で上書きされます');
+    scheduleAutosave();
+  } else {
+    toast('自動保存をオフにしました');
+  }
+  refreshPanels();
+}
+
 // ================================================================ edit body text
 
 async function loadTextLines(page) {
@@ -1408,6 +1648,16 @@ function showTextSelectionBar() {
   const mark = (kind) => () => { tools.markupSelection(kind); hideSelectionBar(); };
   showBarAt(first.left + Math.min(first.width, 240) / 2, first.top, [
     barButton('highlight', 'マーカー', mark('highlight'), { text: true }),
+    ...['#ffe14d', '#8ee59a', '#ff9ec4', '#8fd3ff'].map((colour) => {
+      // One click per colour: students keep a colour code (term, definition,
+      // example…), and picking the colour first each time would be tedious.
+      const dot = document.createElement('button');
+      dot.className = 'dot';
+      dot.style.background = colour;
+      dot.title = 'この色でマーカーを引く';
+      dot.addEventListener('click', (e) => { e.stopPropagation(); remember('highlight', { stroke: colour }); mark('highlight')(); });
+      return dot;
+    }),
     barButton('underline', '下線', mark('underline')),
     barButton('strikeout', '取り消し線', mark('strikeout')),
     barButton('squiggly', '波線', mark('squiggly')),
@@ -2027,6 +2277,10 @@ const commands = {
   uncrop: { label: '切り取りを解除', icon: 'crop', title: 'トリミングを解除して、ページ全体を表示する',
     run: async () => { const r = await structural('/pages/reset-crop', { pages: model.store.pages.map((_, i) => i) }, { label: '解除' }); if (r) toast('ページ全体の表示に戻しました'); }, ...needsDoc },
   study: { label: '暗記シート', icon: 'study', title: '暗記シート（マーカーを引いたところを隠す。クリックで答え合わせ）', run: toggleStudy, active: () => state.study, ...needsDoc },
+  snippet: { label: '定型文', icon: 'snippet', title: '定型文（登録した氏名・住所などを1クリックで入れる）', menu: true, ...needsDoc,
+    run: (e, button) => snippetMenu(button) },
+  slideshow: { label: 'スライドショー', icon: 'slideshow', short: 'スライド\nショー', title: 'スライドショー（全画面で1ページずつ。発表に）', key: 'F5', run: startSlideshow,
+    enabled: () => viewer.pageViews.length > 0 },
   // pages
   rotatecw: { label: '右に回転', icon: 'rotatecw', run: () => ops.rotatePages(90), ...needsDoc },
   rotateccw: { label: '左に回転', icon: 'rotateccw', run: () => ops.rotatePages(-90), ...needsDoc },
@@ -2124,11 +2378,11 @@ const tabs = [
     { label: 'テキスト', items: [{ big: 'freetext' }, { big: 'edittext' }] },
     { label: 'フォント', items: [custom(fontGroup)] },
     { label: 'マーカー', items: [{ big: 'highlight' }, { col: ['underline', 'strikeout', 'squiggly'] }] },
-    { label: '記入', items: [{ col: ['mark', 'hanko', 'signature'] }, { col: ['note', 'image', 'date'] }, { col: ['whiteout', 'snapshot', 'study'] }] },
+    { label: '記入', items: [{ col: ['mark', 'hanko', 'signature'] }, { col: ['note', 'image', 'date'] }, { col: ['whiteout', 'snippet', 'snapshot'] }] },
     { label: '書式', items: [custom(styleGroup)] },
   ] },
   { id: 'insert', label: '挿入', groups: [
-    { label: 'テキスト', items: [{ big: 'freetext' }, { col: ['callout', 'note', 'date'] }] },
+    { label: 'テキスト', items: [{ big: 'freetext' }, { col: ['callout', 'note', 'date'] }, { col: ['snippet'] }] },
     { label: '図形', items: [{ col: ['line', 'arrow', 'polyline'] }, { col: ['square', 'circle', 'polygon'] }] },
     { label: '画像・印', items: [{ big: 'image' }, { big: 'hanko' }, { big: 'signature' }, { col: ['stamp', 'mark', 'whiteout'] }] },
     { label: 'ページに入れる', items: [{ col: ['headerfooter', 'watermark', 'bates'] }] },
@@ -2162,7 +2416,7 @@ const tabs = [
     { label: 'ズーム', items: [{ big: 'fitwidth' }, { col: ['fitpage', 'actual'] }, { col: ['zoomin', 'zoomout'] }] },
     { label: 'パネル', items: [{ col: ['thumbs', 'sidepane', 'comments'] }] },
     { label: '見やすさ', items: [{ col: ['theme', 'invert', 'fullscreen'] }] },
-    { label: '読む・覚える', items: [{ big: 'speak' }, { big: 'study' }, { col: ['find', 'pan', 'snapshot'] }] },
+    { label: '読む・覚える・見せる', items: [{ big: 'slideshow' }, { big: 'study' }, { big: 'speak' }, { col: ['find', 'pan', 'snapshot'] }] },
   ] },
   { id: 'tools', label: 'ツール', groups: [
     { label: '文字認識', items: [{ big: 'ocr' }] },
@@ -2184,6 +2438,8 @@ function fileMenu(anchor) {
     { label: '上書き保存', icon: 'save', key: 'Ctrl+S', disabled: !open, action: () => saveToDisk() },
     { label: '名前を付けて保存…', icon: 'saveas', key: 'Ctrl+Shift+S', disabled: !open, action: () => saveToDisk({ saveAs: true }) },
     { label: 'コピーをダウンロード', icon: 'download', disabled: !open, action: downloadCopy },
+    { label: `自動保存: ${getPref('autosave') ? 'オン（クリックでオフ）' : 'オフ（クリックでオン）'}`, icon: 'save',
+      title: '変更を、開いた元のファイルへ自動で上書き保存します', action: toggleAutosave },
     { label: '印刷…', icon: 'print', key: 'Ctrl+P', disabled: !open, action: printDocument },
     '-',
     { heading: '書き出す' },
@@ -2273,6 +2529,7 @@ window.addEventListener('keydown', (e) => {
     }
     return;
   }
+  if (e.key === 'F5' && viewer.pageViews.length) { e.preventDefault(); startSlideshow(); return; }
   if (e.key === 'F2') {
     const selection = selectedAnnots();
     if (selection.length === 1) { e.preventDefault(); startTextEdit(selection[0].id); }
@@ -2311,6 +2568,7 @@ selectTool('select');
 refreshAll();
 status('準備完了 — PDFを開いてください');
 pruneDrafts();
+showRecent();
 
 // Installed as an app, PDF Studio can be chosen under "Open with" for a PDF;
 // the file arrives here, with a handle that lets Save write straight back.
