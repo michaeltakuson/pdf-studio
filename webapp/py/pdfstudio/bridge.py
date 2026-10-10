@@ -690,6 +690,25 @@ def ocr_apply(payload: dict) -> dict:
     return out
 
 
+def stats(payload: dict) -> dict:
+    """How much text is in the document — what a report's word limit asks about."""
+    entry = _doc(payload)
+    characters = 0
+    words = 0
+    blank = 0
+    for page in entry.doc:
+        text = page.get_text()
+        body = "".join(text.split())
+        characters += len(body)
+        # Space-separated runs of Latin letters and digits count as words;
+        # Japanese has no word boundaries, which is why characters are counted.
+        words += sum(1 for token in text.split() if any(ch.isascii() and ch.isalnum() for ch in token))
+        if not body:
+            blank += 1
+    return {"pages": entry.doc.page_count, "characters": characters, "words": words, "pagesWithoutText": blank,
+            "bytes": len(entry.doc.tobytes())}
+
+
 def page_text(payload: dict) -> dict:
     entry = _doc(payload)
     index = int(payload.get("page", 0))
@@ -914,6 +933,7 @@ _JSON_ROUTES = {
     "metadata.set": metadata_set,
     "ocr.apply": ocr_apply,
     "page.text": page_text,
+    "stats": stats,
 }
 
 _BINARY_ROUTES = {

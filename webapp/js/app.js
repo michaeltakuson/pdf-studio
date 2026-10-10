@@ -1332,6 +1332,53 @@ function arrange(how) {
   model.endMerge();
 }
 
+// ================================================================ dictation
+
+let recognition = null;
+
+/**
+ * Type by voice into a text box. Uses the browser's own speech recognition
+ * (Chrome and Edge send the audio to their speech service to do it), so it
+ * is only started when the button is pressed, and says so.
+ */
+function toggleDictation() {
+  const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Speech) { toast('このブラウザは音声入力に対応していません（Chrome か Edge で使えます）', 'warn'); return; }
+  if (recognition) { recognition.stop(); return; }
+  if (!hasDoc()) { toast('先にPDFを開いてください', 'warn'); return; }
+  // Speak into the open text box, or start a new one in the middle of the view.
+  if (!state.editor || state.editor.meta.isLine) {
+    const made = addTextBox('', { edit: true });
+    if (!made) return;
+  }
+  recognition = new Speech();
+  recognition.lang = 'ja-JP';
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.onresult = (event) => {
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      if (!event.results[i].isFinal) continue;
+      const text = event.results[i][0].transcript;
+      if (state.editor && !state.editor.meta.isLine) {
+        state.editor.node.focus();
+        document.execCommand('insertText', false, text);
+      }
+    }
+  };
+  recognition.onerror = (event) => {
+    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') toast('マイクの使用が許可されていません。アドレスバーの鍵のアイコンから許可してください', 'warn');
+    else if (event.error !== 'no-speech' && event.error !== 'aborted') toast(`音声入力を続けられませんでした（${event.error}）`, 'warn');
+  };
+  recognition.onend = () => { recognition = null; ribbon.refresh(); };
+  try {
+    recognition.start();
+    toast('音声入力中です。話した言葉が文字になります（もう一度押すと止まります。音声はブラウザの音声認識サービスに送られます）');
+  } catch {
+    recognition = null;
+  }
+  ribbon.refresh();
+}
+
 // ================================================================ snippets
 
 async function editSnippets() {
@@ -1696,6 +1743,17 @@ function showTextSelectionBar() {
     barButton('strikeout', '取り消し線', mark('strikeout')),
     barButton('squiggly', '波線', mark('squiggly')),
     (() => { const s = document.createElement('span'); s.className = 'rsep'; return s; })(),
+    barButton('note', 'コメント（選んだ文字にマーカーを引いて、メモを付ける）', () => {
+      const before = new Set(model.store.annots.map((a) => a.id));
+      if (!tools.markupSelection('highlight')) return;
+      hideSelectionBar();
+      const made = model.store.annots.filter((a) => !before.has(a.id));
+      if (!made.length) return;
+      model.select([made[0].id]);
+      showRightPanel('props');
+      // The comment box is the first field of the panel: put the caret in it.
+      setTimeout(() => $('#panelProps textarea')?.focus(), 60);
+    }, { text: true }),
     barButton('copy', 'コピー (Ctrl+C)', () => {
       navigator.clipboard?.writeText(document.getSelection().toString()).then(() => toast('コピーしました')).catch(() => document.execCommand('copy'));
       hideSelectionBar();
@@ -2321,6 +2379,8 @@ const commands = {
   uncrop: { label: '切り取りを解除', icon: 'crop', title: 'トリミングを解除して、ページ全体を表示する',
     run: async () => { const r = await structural('/pages/reset-crop', { pages: model.store.pages.map((_, i) => i) }, { label: '解除' }); if (r) toast('ページ全体の表示に戻しました'); }, ...needsDoc },
   study: { label: '暗記シート', icon: 'study', title: '暗記シート（マーカーを引いたところを隠す。クリックで答え合わせ）', run: toggleStudy, active: () => state.study, ...needsDoc },
+  dictate: { label: '音声入力', icon: 'mic', title: '音声入力（話した言葉をテキストボックスに入力。Chrome / Edge）', run: toggleDictation,
+    active: () => !!recognition, ...needsDoc },
   snippet: { label: '定型文', icon: 'snippet', title: '定型文（登録した氏名・住所などを1クリックで入れる）', menu: true, ...needsDoc,
     run: (e, button) => snippetMenu(button) },
   slideshow: { label: 'スライドショー', icon: 'slideshow', short: 'スライド\nショー', title: 'スライドショー（全画面で1ページずつ。発表に）', key: 'F5', run: startSlideshow,
@@ -2423,7 +2483,7 @@ const tabs = [
   { id: 'home', label: 'ホーム', groups: [
     { label: 'クリップボード', items: [{ big: 'paste' }, { col: ['cut', 'copy', 'duplicate'] }] },
     { label: 'ツール', items: [{ big: 'select' }, { col: ['pan', 'find', 'remove'] }] },
-    { label: 'テキスト', items: [{ big: 'freetext' }, { big: 'edittext' }] },
+    { label: 'テキスト', items: [{ big: 'freetext' }, { big: 'edittext' }, { col: ['dictate', 'callout'] }] },
     { label: 'フォント', items: [custom(fontGroup)] },
     { label: 'マーカー', items: [{ big: 'highlight' }, { col: ['underline', 'strikeout', 'squiggly'] }] },
     { label: '記入', items: [{ col: ['mark', 'hanko', 'signature'] }, { col: ['note', 'image', 'date'] }, { col: ['whiteout', 'snippet', 'snapshot'] }] },

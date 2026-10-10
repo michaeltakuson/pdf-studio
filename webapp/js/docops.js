@@ -570,9 +570,16 @@ export async function compressDocument() {
 export async function documentProperties() {
   const data = await (await fetch(docUrl(''))).json();
   const meta = data.metadata || {};
+  let summary = `${model.store.pages.length} ページ`;
+  try {
+    const s = await (await fetch(docUrl('/stats'))).json();
+    const size = s.bytes > 1024 * 1024 ? `${(s.bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(s.bytes / 1024))} KB`;
+    summary = `${s.pages} ページ ／ ${s.characters.toLocaleString()} 文字（空白を除く）／ 英単語 ${s.words.toLocaleString()} 語 ／ ${size}`
+      + (s.pagesWithoutText ? `\n文字情報のないページが ${s.pagesWithoutText} ページあります（スキャン画像。「ツール」→「文字認識」で検索できるようになります）` : '');
+  } catch { /* the counts are a nicety */ }
   const values = await formDialog({
     title: '文書のプロパティ',
-    intro: `${model.store.pages.length} ページ`,
+    intro: summary,
     fields: [
       { key: 'title', label: 'タイトル', value: meta.title || '' },
       { key: 'author', label: '作成者', value: meta.author || '' },

@@ -173,6 +173,7 @@ async function route(url, init) {
     return { action: SIMPLE[rest[0]], payload: await readPayload(init, base) };
   }
   if (rest[0] === 'plain-text' && method === 'GET') return { action: 'text', payload: base };
+  if (rest[0] === 'stats' && method === 'GET') return { action: 'stats', payload: base };
   if (rest[0] === 'page-text' && rest[1] !== undefined && method === 'GET') {
     return { action: 'page.text', payload: { ...base, page: Number(rest[1]) } };
   }

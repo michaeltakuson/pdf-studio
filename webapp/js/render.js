@@ -472,6 +472,13 @@ export function renderAnnot(annot, { editingId = null, mask = null } = {}) {
     group.append(number);
   }
 
+  // A mark with a comment shows it on hover, as PDF viewers do.
+  if (annot.contents && annot.type !== 'freetext' && annot.type !== 'note' && !annot.measure) {
+    const tip = el('title');
+    tip.textContent = annot.contents;
+    group.append(tip);
+  }
+
   // A transparent hit target keeps thin strokes clickable.
   const [hx0, hy0, hx1, hy1] = annot.rect || [0, 0, 0, 0];
   group.prepend(el('rect', {
