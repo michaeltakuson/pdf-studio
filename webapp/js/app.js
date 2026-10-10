@@ -16,7 +16,7 @@ import {
 import { Ribbon } from './ribbon.js';
 import { iconSvg } from './icons.js';
 import { TextEditor, fitRect, ensureFontLoaded, LINE_HEIGHT } from './textedit.js';
-import { MARKUP_TOOLS, translated } from './tools.js';
+import { MARKUP_TOOLS, ONE_SHOT, translated } from './tools.js';
 import { signatureDialog, hankoDialog, normaliseImage, fileToDataUrl } from './stamps.js';
 import * as ops from './docops.js';
 import { keyFor, saveDraft, loadDraft, clearDraft, pruneDrafts } from './drafts.js';
@@ -848,9 +848,12 @@ function closeNoteEditor() {
 // ================================================================ tool events
 
 tools.addEventListener('edited', () => refreshPanels());
-tools.addEventListener('tool', () => { hideSelectionBar(); refreshPanels(); });
+tools.addEventListener('tool', () => {
+  if (state.toolLock && state.toolLock !== tools.tool) state.toolLock = null;
+  hideSelectionBar(); refreshPanels();
+});
 tools.addEventListener('edit-text', (e) => startTextEdit(e.detail.id, e.detail));
-tools.addEventListener('tool-done', () => { setToolButton('select'); });
+tools.addEventListener('tool-done', () => { if (state.toolLock !== tools.tool) setToolButton('select'); });
 tools.addEventListener('hint', (e) => toast(e.detail.message));
 tools.addEventListener('refit', (e) => refitText(e.detail.ids));
 tools.addEventListener('resized', (e) => { refitText([e.detail.id]); model.endMerge(); });
@@ -2438,10 +2441,28 @@ function showHelp() {
 
 // ================================================================ commands
 
-const tool = (name, label, icon, extra = {}) => ({
-  label, icon, run: () => selectTool(tools.tool === name && name !== 'select' ? 'select' : name),
-  active: () => tools.tool === name, enabled: hasDoc, ...extra,
-});
+// Shapes hand back to the pointer after one; a double-click on the button
+// keeps the tool for drawing several in a row (Word's "lock drawing mode").
+// Not for the tools that open a text box when they finish.
+const canLock = (name) => ONE_SHOT.has(name) && name !== 'callout' && name !== 'note';
+const tool = (name, label, icon, extra = {}) => {
+  const command = {
+    label, icon, run: () => selectTool(tools.tool === name && name !== 'select' ? 'select' : name),
+    active: () => tools.tool === name, enabled: hasDoc, ...extra,
+  };
+  if (canLock(name)) {
+    command.title = `${command.title || label} ／ ダブルクリックで続けて描く`;
+    command.locked = () => state.toolLock === name && tools.tool === name;
+    command.dblrun = () => {
+      if (!hasDoc()) return;
+      selectTool(name);
+      state.toolLock = name;
+      ribbon.refresh();
+      toast(`${label}を続けて描けます（Esc で終了）`);
+    };
+  }
+  return command;
+};
 const needsDoc = { enabled: hasDoc };
 const needsSelection = { enabled: () => model.store.selection.length > 0 };
 
@@ -2735,6 +2756,15 @@ document.addEventListener('change', (e) => {
   pointerChooser = null;
   if (document.activeElement === control) control.blur();
 }, true);
+
+// The same for the buttons of the ribbon and the bars: clicked with the mouse,
+// they do not keep the keyboard, or the next Enter or Space would press them
+// again (duplicating twice, say) instead of acting on the page.
+document.addEventListener('click', (e) => {
+  if (!e.detail) return;   // pressed from the keyboard: leave the focus where it is
+  const button = e.target.closest?.('#ribbon button, #ribbonTabs button, header button, footer button');
+  if (button && document.activeElement === button) button.blur();
+});
 
 window.addEventListener('keydown', (e) => {
   if (document.querySelector('.dialog-backdrop')) return;

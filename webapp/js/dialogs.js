@@ -196,7 +196,23 @@ function closeOnOutside(element, onClose) {
     window.removeEventListener('blur', close);
     onClose?.();
   };
-  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); close(); return; }
+    if (element.getAttribute('role') !== 'menu') return;
+    // A menu can be walked with the arrow keys; Enter then presses the item.
+    const items = [...element.querySelectorAll('button:not(:disabled)')];
+    if (!items.length) return;
+    const at = items.indexOf(document.activeElement);
+    const next = e.key === 'ArrowDown' ? items[(at + 1) % items.length]
+      : e.key === 'ArrowUp' ? items[(at < 0 ? items.length : at) - 1] || items[items.length - 1]
+      : e.key === 'Home' ? items[0]
+      : e.key === 'End' ? items[items.length - 1]
+      : null;
+    if (!next) return;
+    e.preventDefault();
+    e.stopPropagation();
+    next.focus();
+  };
   setTimeout(() => {
     document.addEventListener('pointerdown', close, true);
     document.addEventListener('keydown', onKey, true);

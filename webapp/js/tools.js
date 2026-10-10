@@ -30,7 +30,7 @@ const MEASURE_POINT_TOOLS = new Set([
 ]);
 // Tools that hand back to the pointer once they have made their one thing,
 // so the new shape can be adjusted straight away.
-const ONE_SHOT = new Set([
+export const ONE_SHOT = new Set([
   'square', 'circle', 'line', 'arrow', 'areaHighlight', 'stamp', 'polygon', 'polyline',
   'callout', 'note',
 ]);

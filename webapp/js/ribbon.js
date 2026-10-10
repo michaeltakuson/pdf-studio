@@ -144,6 +144,7 @@ export class Ribbon {
       const disabled = command.enabled ? !command.enabled() : false;
       if (node.disabled !== disabled) node.disabled = disabled;
       node.classList.toggle('active', !!(command.active && command.active()));
+      if (command.locked) node.classList.toggle('locked', command.locked());
     }
     const active = document.activeElement;
     for (const custom of this._customs) {
@@ -213,10 +214,12 @@ export class Ribbon {
     button.title = `${command.title || command.label}${key}`;
     button.disabled = command.enabled ? !command.enabled() : false;
     if (command.active && command.active()) button.classList.add('active');
+    if (command.locked && command.locked()) button.classList.add('locked');
     if (command.menu) button.insertAdjacentHTML('beforeend', iconSvg('caret', 11));
     // Pressing a ribbon button must not take the caret out of an open text box.
     button.addEventListener('mousedown', (event) => event.preventDefault());
     button.addEventListener('click', (event) => command.run(event, button));
+    if (command.dblrun) button.addEventListener('dblclick', (event) => command.dblrun(event, button));
     this._buttons.push({ node: button, command });
     return button;
   }
