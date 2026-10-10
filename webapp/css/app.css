@@ -155,7 +155,23 @@ input[type="range"] { accent-color: var(--accent); }
 }
 .tb-search input::placeholder { color: inherit; opacity: .7; }
 .tb-search-icon { display: inline-flex; opacity: .8; }
-#searchCount { font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: .85; }
+#searchCount {
+  font: inherit; font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap;
+  border: none; background: transparent; color: inherit; opacity: .9; cursor: pointer;
+  padding: 2px 5px; border-radius: 4px;
+}
+#searchCount:hover { background: rgba(128, 128, 128, .25); }
+.hit-list { width: min(420px, 86vw); max-height: 62vh; overflow-y: auto; margin: -4px; }
+.hit-list .hit-head { padding: 4px 8px 6px; font-size: 11.5px; color: var(--text-dim); }
+.hit-row {
+  display: flex; gap: 9px; align-items: baseline; width: 100%; text-align: left;
+  border: none; background: transparent; color: var(--text); font: inherit;
+  padding: 5px 8px; border-radius: 5px; cursor: pointer;
+}
+.hit-row:hover, .hit-row.current { background: var(--surface-3); }
+.hit-row .pg { flex: none; min-width: 4.2ch; color: var(--accent); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.hit-row .ctx { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.hit-row mark { background: #ffe14d; color: #000; border-radius: 2px; padding: 0 1px; }
 
 /* ---------------------------------------------------------------- ribbon */
 

@@ -147,6 +147,20 @@ export async function addMargins() {
   if (result) toast('余白を足しました（Ctrl+Z で戻せます）');
 }
 
+export async function fitPaper() {
+  const count = model.store.annots.length;
+  const values = await formDialog({
+    title: '用紙サイズをそろえる',
+    intro: 'すべてのページを同じ大きさの用紙にそろえます（縮尺を合わせて中央に配置。横長のページは横置き）。大きさの違うスキャンや資料をまとめて印刷するときに。',
+    warning: `${count ? `書き込み ${count} 件はページに焼き付けられ、あとから動かせなくなります。` : ''}文書内のリンクと入力欄はなくなります。${UNDO_NOTE}`,
+    fields: [{ key: 'paper', label: '用紙', type: 'select', options: { a4: 'A4', b5: 'B5', a3: 'A3', b4: 'B4', letter: 'レター' } }],
+    confirmLabel: 'そろえる',
+  });
+  if (!values) return;
+  const result = await structural('/fit-paper', { paper: values.paper }, { label: '用紙サイズの変更' });
+  if (result) toast(`すべてのページを ${values.paper.toUpperCase()} にそろえました（Ctrl+Z で戻せます）`);
+}
+
 export async function handout() {
   const values = await formDialog({
     title: '配布資料にする（複数ページを1枚に）',

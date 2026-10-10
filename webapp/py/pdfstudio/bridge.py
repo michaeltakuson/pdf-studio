@@ -146,11 +146,18 @@ def search(payload: dict) -> dict:
                 "quads": [[c for p in (quad.ul, quad.ur, quad.ll, quad.lr) for c in p]],
                 "rect": list(quad.rect),
             })
-            hits.append({
+            hit = {
                 "page": page.number,
                 "quad": found["quads"][0],
                 "rect": found["rect"],
-            })
+            }
+            if len(hits) < 400:
+                # The words around the hit, for a list of results to read
+                # through. Past a few hundred nobody reads the list.
+                box = quad.rect
+                around = pymupdf.Rect(box.x0 - 150, box.y0 + 1, box.x1 + 150, box.y1 - 1) & page.rect
+                hit["context"] = " ".join(page.get_textbox(around).split())[:90]
+            hits.append(hit)
     return {"hits": hits, "relaxed": relaxed_used}
 
 
@@ -631,6 +638,17 @@ def outline_set(payload: dict) -> dict:
     return {"toc": entry.doc.get_toc(simple=True)}
 
 
+def fit_paper(payload: dict) -> dict:
+    entry = _doc(payload)
+    _sync(entry, payload)
+    backup = entry.snapshot("before-fit-paper")
+    try:
+        entry.replace(pages.fit_to_paper(entry.doc, payload.get("paper", "a4")))
+    except Exception as exc:
+        raise ApiError(400, f"用紙サイズをそろえられませんでした: {exc}")
+    return _reload(entry, backup)
+
+
 def outline_auto(payload: dict) -> dict:
     entry = _doc(payload)
     toc = pages.auto_outline(entry.doc)
@@ -930,6 +948,7 @@ _JSON_ROUTES = {
     "compress": compress_document,
     "outline.set": outline_set,
     "outline.auto": outline_auto,
+    "fit-paper": fit_paper,
     "metadata.set": metadata_set,
     "ocr.apply": ocr_apply,
     "page.text": page_text,

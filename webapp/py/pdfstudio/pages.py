@@ -281,6 +281,47 @@ def set_outline(doc: pymupdf.Document, toc: list) -> None:
     doc.set_toc(clean)
 
 
+PAPER = {"a4": (595.28, 841.89), "a3": (841.89, 1190.55), "b5": (515.91, 728.50),
+         "b4": (728.50, 1031.81), "letter": (612.0, 792.0)}
+
+
+def fit_to_paper(doc: pymupdf.Document, paper: str = "a4") -> bytes:
+    """Put every page on the same size of paper, scaled to fit and centred.
+
+    Scans and collected handouts often mix sizes, which printers handle badly.
+    Each page keeps its shape; a landscape page gets landscape paper. Markup
+    is burned in first, because it cannot follow the page onto a new sheet.
+    """
+    width, height = PAPER.get(str(paper).lower(), PAPER["a4"])
+    source = pymupdf.open("pdf", doc.tobytes())
+    try:
+        try:
+            source.bake()
+        except Exception:
+            pass
+        out = pymupdf.open()
+        for index in range(source.page_count):
+            shape = source[index].rect
+            landscape = shape.width > shape.height
+            w, h = (height, width) if landscape else (width, height)
+            sheet = out.new_page(width=w, height=h)
+            scale = min(w / shape.width, h / shape.height)
+            pw, ph = shape.width * scale, shape.height * scale
+            target = pymupdf.Rect((w - pw) / 2, (h - ph) / 2, (w + pw) / 2, (h + ph) / 2)
+            sheet.show_pdf_page(target, source, index)
+        toc = source.get_toc(simple=True)
+        if toc:
+            try:
+                out.set_toc(toc)
+            except Exception:
+                pass
+        data = out.tobytes(garbage=3, deflate=True)
+        out.close()
+        return data
+    finally:
+        source.close()
+
+
 def auto_outline(doc: pymupdf.Document, limit: int = 500) -> list[list]:
     """Guess a table of contents from the text itself.
 

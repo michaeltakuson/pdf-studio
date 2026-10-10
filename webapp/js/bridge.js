@@ -173,7 +173,7 @@ async function route(url, init) {
   const SIMPLE = {
     undo: 'undo', compress: 'compress', nup: 'nup', split: 'split', images: 'images',
     'extract-ranges': 'pages.extract-ranges', 'ocr-apply': 'ocr.apply',
-    outline: 'outline.set', metadata: 'metadata.set', snapshot: 'snapshot', 'outline-auto': 'outline.auto',
+    outline: 'outline.set', metadata: 'metadata.set', snapshot: 'snapshot', 'outline-auto': 'outline.auto', 'fit-paper': 'fit-paper',
   };
   if (rest.length === 1 && SIMPLE[rest[0]] && method === 'POST') {
     return { action: SIMPLE[rest[0]], payload: await readPayload(init, base) };

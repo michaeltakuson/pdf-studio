@@ -11,7 +11,7 @@ import {
 import * as measure from './measure.js';
 import { remember, getPref, setPref, styleFor } from './defaults.js';
 import {
-  confirmDialog, formDialog, infoDialog, customDialog, openMenu, openMenuAt, isComposing, node,
+  confirmDialog, formDialog, infoDialog, customDialog, openMenu, openMenuAt, openPopover, isComposing, node,
 } from './dialogs.js';
 import { Ribbon } from './ribbon.js';
 import { iconSvg } from './icons.js';
@@ -52,7 +52,7 @@ async function adopt(data, { handle = null, message = null, draftKey = null, kee
   state.textLines.clear();
   state.searchHits = [];
   state.searchIndex = -1;
-  $('#searchCount').textContent = '';
+  setSearchCount('');
   model.loadDocument(data);
   $('#emptyState').classList.add('hidden');
   await viewer.load(`${docUrl('/file')}?t=${Date.now()}`, { keepPosition });
@@ -2107,7 +2107,7 @@ async function runSearch() {
   if (!query || !hasDoc()) {
     state.searchHits = [];
     state.searchIndex = -1;
-    $('#searchCount').textContent = '';
+    setSearchCount('');
     drawSearchHits();
     return;
   }
@@ -2117,7 +2117,7 @@ async function runSearch() {
   if ($('#searchInput').value.trim() !== query) return; // the query moved on while this ran
   state.searchHits = data.hits || [];
   state.searchIndex = state.searchHits.length ? 0 : -1;
-  $('#searchCount').textContent = state.searchHits.length ? `${state.searchHits.length} 件` : '該当なし';
+  setSearchCount(state.searchHits.length ? `${state.searchHits.length} 件` : '該当なし');
   drawSearchHits();
   ribbon.refresh();
   if (state.searchIndex >= 0) {
@@ -2128,6 +2128,41 @@ async function runSearch() {
     toast('検索できる文字がありません');
   }
 }
+
+function setSearchCount(text) {
+  const node = $('#searchCount');
+  node.textContent = text;
+  node.hidden = !text;
+}
+
+/** Every hit with the words around it; click one to go there. */
+function showSearchList() {
+  if (!state.searchHits.length) return;
+  const query = state.searchQuery;
+  openPopover($('#searchCount'), (close) => {
+    const list = h('div', { class: 'hit-list' });
+    list.append(h('div', { class: 'hit-head', text: `「${query}」 ${state.searchHits.length} 件（クリックで移動）` }));
+    state.searchHits.slice(0, 400).forEach((hit, index) => {
+      const row = h('button', { class: `hit-row${index === state.searchIndex ? ' current' : ''}`, onclick: () => { goToHit(index); close(); } });
+      const context = h('span', { class: 'ctx' });
+      const text = hit.context || query;
+      const at = text.toLowerCase().indexOf(query.toLowerCase());
+      if (at >= 0) {
+        // Keep the hit in view: lead with a little of what comes before it.
+        const from = Math.max(0, at - 16);
+        context.append(`${from ? '…' : ''}${text.slice(from, at)}`, h('mark', { text: text.slice(at, at + query.length) }), text.slice(at + query.length));
+      } else {
+        context.textContent = text;
+      }
+      row.append(h('span', { class: 'pg', text: `p.${hit.page + 1}` }), context);
+      list.append(row);
+    });
+    if (state.searchHits.length > 400) list.append(h('div', { class: 'hit-head', text: `ほか ${state.searchHits.length - 400} 件` }));
+    setTimeout(() => list.querySelector('.current')?.scrollIntoView({ block: 'center' }), 0);
+    return list;
+  });
+}
+$('#searchCount').addEventListener('click', showSearchList);
 
 function drawSearchHits() {
   for (const view of viewer.pageViews) {
@@ -2152,7 +2187,7 @@ function goToHit(index) {
   const hit = state.searchHits[state.searchIndex];
   viewer.scrollToPage(hit.page, hit.rect[1]);
   drawSearchHits();
-  $('#searchCount').textContent = `${state.searchIndex + 1} / ${state.searchHits.length}`;
+  setSearchCount(`${state.searchIndex + 1} / ${state.searchHits.length}`);
 }
 
 let searchTimer;
@@ -2467,6 +2502,7 @@ const commands = {
   extract: { label: '抜き出す', icon: 'pageextract', title: 'ページを抜き出して別のPDFにする', run: ops.extractPages, ...needsDoc },
   split: { label: '分割', icon: 'split', title: 'PDFを複数のファイルに分割', run: ops.splitDocument, ...needsDoc },
   margins: { label: '余白を足す', icon: 'margins', short: '余白を\n足す', title: 'ノート用の余白を足す（スライドの横にメモ欄を作る）', run: ops.addMargins, ...needsDoc },
+  fitpaper: { label: '用紙をそろえる', icon: 'pageblank', title: '用紙サイズをそろえる（大きさの違うページをA4などに統一）', run: ops.fitPaper, ...needsDoc },
   handout: { label: '配布資料', icon: 'nup', title: '複数ページを1枚にまとめる（2/4/6/8/9面）', run: ops.handout, ...needsDoc },
   toimages: { label: '画像にする', icon: 'image', title: 'ページを画像（PNG/JPEG）にする', run: ops.exportImages, ...needsDoc },
   headerfooter: { label: 'ページ番号', icon: 'number', title: 'ページ番号・ヘッダー・フッターを入れる', run: ops.addHeaderFooter, ...needsDoc },
@@ -2587,7 +2623,7 @@ const tabs = [
     { label: '回転', items: [{ big: 'rotatecw' }, { col: ['rotateccw', 'rotateall'] }] },
     { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }] },
     { label: '結合・分割', items: [{ big: 'merge' }, { col: ['extract', 'split'] }] },
-    { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'headerfooter'] }, { col: ['crop', 'uncrop'] }] },
+    { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'headerfooter'] }, { col: ['crop', 'uncrop', 'fitpaper'] }] },
     { label: '対象', items: [custom(() => h('div', { class: 'rhint', text: hasDoc()
       ? `対象: ${describePages(targetPages())}。左のページ一覧で Ctrl / Shift を押しながら選ぶと、複数ページをまとめて操作できます。`
       : 'PDFを開くと、ページの回転・削除・並べ替え・結合ができます。' }),

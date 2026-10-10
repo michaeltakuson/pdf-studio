@@ -251,6 +251,27 @@ def main() -> int:
     failures += not check(media == "image/png" and data[:4] == b"\x89PNG", "ページを画像にできる")
     doc.close()
 
+    # ---------------------------------------------------------------- one paper size
+    mixed = pymupdf.open()
+    mixed.new_page(width=300, height=400).insert_text((30, 60), "small portrait")
+    mixed.new_page(width=1000, height=500).insert_text((30, 60), "wide landscape")
+    unified = pymupdf.open("pdf", pages.fit_to_paper(mixed, "a4"))
+    sizes = [(round(p.rect.width), round(p.rect.height)) for p in unified]
+    failures += not check(sizes == [(595, 842), (842, 595)], f"用紙をA4にそろえる（横長のページは横置き）{sizes}")
+    failures += not check("small portrait" in unified[0].get_text() and "wide landscape" in unified[1].get_text(),
+                          "そろえても本文はそのまま読める")
+    words = unified[1].get_text("words")
+    failures += not check(all(0 <= w[0] and w[2] <= 842 and 0 <= w[1] and w[3] <= 595 for w in words),
+                          "中身は用紙の中に収まる")
+
+    # ---------------------------------------------------------------- search results carry their context
+    doc = fresh()
+    opened = bridge.dispatch("open", {"name": "s.pdf", "data": doc.tobytes()})["json"]
+    found = bridge.dispatch("search", {"docId": opened["id"], "query": "redaction"})["json"]["hits"]
+    failures += not check(len(found) >= 2 and all("redaction" in h.get("context", "").lower() for h in found),
+                          f"検索結果に前後の文が付く（{found[0].get('context', '')[:40]!r}）")
+    doc.close()
+
     # ---------------------------------------------------------------- editing body text
     doc = fresh()
     page = doc[0]
