@@ -46,6 +46,22 @@ export function loadDocument({ id, name, pages, annots, undoDepth = 0 }, { keepN
   emit('document');
 }
 
+/**
+ * Hand a document that was being worked on in preview over to the engine.
+ *
+ * Unlike loadDocument this keeps everything the user has done so far — the
+ * annotations they added and their undo history — and only fills in what the
+ * engine knows: its id for the document and any markup already in the file.
+ */
+export function rebind({ id, pages, annots, undoDepth = 0 }) {
+  const mine = new Set(store.annots.map((a) => a.id));
+  store.docId = id;
+  store.pages = pages;
+  store.annots = [...(annots || []).map(normalise).filter((a) => !mine.has(a.id)), ...store.annots];
+  structuralDepth = undoDepth;
+  emit('document');
+}
+
 function normalise(a) {
   return {
     id: a.id || uid(),

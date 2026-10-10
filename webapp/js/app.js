@@ -129,40 +129,106 @@ function positionKey() {
 }
 
 /**
- * Show a PDF for reading while the editing engine is still starting up.
- * Rendering needs only pdf.js, which is ready at once; the engine takes over
- * (keeping the reader's place) as soon as it is ready.
+ * Show a PDF — and let the user start marking it up — while the editing
+ * engine is still starting.
+ *
+ * Rendering needs only pdf.js, and adding text, markers, shapes or pen
+ * strokes only changes the model in the browser; neither has to wait for
+ * the engine. Anything that does need it (saving, searching, page
+ * operations) simply waits its turn. When the engine is ready it opens the
+ * same file and takes the document over, keeping every mark and the undo
+ * history.
  */
 async function previewFile(file, handle) {
-  state.preview = { file, handle };
+  if (!(await confirmDiscard())) return;
+  flushEditing();
+  let settle;
+  window.pdfStudioAdopted = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  window.pdfStudioAdopted.catch(() => {});
+  state.preview = { file, handle, settle };
   try {
     await viewer.load(new Uint8Array(await file.arrayBuffer()));
-    if (state.preview?.file !== file) return;
-    $('#emptyState').classList.add('hidden');
-    $('#docName').textContent = file.name;
-    renderThumbs($('#panelThumbs'), viewer, { current: 0, selected: new Set() }, thumbHandlers);
-    syncZoomControls();
-    refreshPanels();
-    status('読むことができます。書き込みや保存は、編集機能の準備ができしだい使えます…');
-    toast(`${file.name} を表示しました。編集機能は準備中です（まもなく使えます）`);
   } catch {
     // Encrypted or unusual files are left for the engine, which asks for the password.
     status('編集機能の準備ができしだい開きます…');
+    return;
+  }
+  if (state.preview?.file !== file) return;
+  state.fileHandle = null;
+  state.draftKey = null;
+  state.toc = [];
+  state.pageSelection.clear();
+  state.textLines.clear();
+  model.loadDocument({
+    id: 'preview', name: file.name, annots: [],
+    pages: viewer.pageViews.map((view) => ({ index: view.index, width: view.width, height: view.height, rotation: view.rotation })),
+  });
+  state.unsaved = false;
+  $('#emptyState').classList.add('hidden');
+  renderThumbs($('#panelThumbs'), viewer, { current: 0, selected: new Set() }, thumbHandlers);
+  renderOutlinePanel();
+  syncZoomControls();
+  refreshAll();
+  toast(`${file.name} を開きました。書き込みはもう始められます（保存や検索は、準備ができしだい動きます）`);
+  if (window.pdfStudioReady) finishPreview();
+}
+
+/** The engine is ready: have it open the previewed file and take over. */
+async function finishPreview() {
+  const waiting = state.preview;
+  if (!waiting) return;
+  if (model.store.docId !== 'preview') {
+    // Nothing could be shown (an encrypted file, say): open it the ordinary way.
+    state.preview = null;
+    openFile(waiting.file, '', waiting.handle);
+    return;
+  }
+  // Not in the middle of a word or a drag: wait for a quiet moment.
+  if (state.editor || noteEditor || tools.pending) { setTimeout(finishPreview, 400); return; }
+  try {
+    const form = new FormData();
+    form.append('file', waiting.file);
+    const response = await fetch('/api/open', { method: 'POST', body: form });
+    if (state.preview !== waiting) return;   // another file was opened meanwhile
+    if (!response.ok) throw new Error(await errorDetail(response));
+    const data = await response.json();
+    if (state.editor || noteEditor || tools.pending) await new Promise((resolve) => setTimeout(resolve, 600));
+    state.preview = null;
+    window.pdfStudioRealId = data.id;
+    const mine = model.store.annots.length;
+    if (data.annots.length) {
+      // The file already has markup. The preview painted it as part of the
+      // page; from here the overlay draws it, so the page must stop doing so.
+      flushEditing();
+      await viewer.load(`/api/doc/${data.id}/file?t=${Date.now()}`, { keepPosition: true });
+    }
+    state.toc = data.toc || [];
+    model.rebind(data);
+    state.fileHandle = waiting.handle || null;
+    state.draftKey = keyFor(waiting.file);
+    waiting.settle.resolve();
+    afterReload();
+    refreshAll();
+    if (waiting.handle) rememberFile(waiting.handle).then(showRecent);
+    status(`${model.store.pages.length} ページ ／ 書き込み ${model.store.annots.length} 件`);
+    if (!mine) setTimeout(() => offerDraft(data), 60);
+  } catch (err) {
+    waiting.settle.reject(err);
+    if (state.preview === waiting) state.preview = null;
+    toast(`この文書は編集用に開けませんでした: ${err.message}。読むことはできますが、保存はできません`, 'error');
   }
 }
 
-document.addEventListener('pdfstudio:ready', () => {
-  const waiting = state.preview;
-  state.preview = null;
-  if (waiting) openFile(waiting.file, '', waiting.handle, { keepPosition: viewer.pageViews.length > 0 });
-});
+document.addEventListener('pdfstudio:ready', finishPreview);
 document.addEventListener('pdfstudio:failed', (e) => {
+  state.preview?.settle.reject(new Error(e.detail));
   toast(`編集機能を読み込めませんでした: ${e.detail}。インターネット接続を確認して、ページを再読み込みしてください`, 'error');
 });
 
 async function openFile(file, password = '', handle = null, { keepPosition = false } = {}) {
-  if (!window.pdfStudioReady) { previewFile(file, handle); return; }
+  if (!window.pdfStudioReady && !password) { previewFile(file, handle); return; }
   if (!password && !(await confirmDiscard())) return;
+  state.preview = null;
   const done = busy(`${file.name} を開いています…`);
   try {
     await paint();
@@ -469,12 +535,13 @@ function refreshPanels() {
   $('#btnUndo').title = model.history.nextIsStructural
     ? '直前のページ操作を元に戻す (Ctrl+Z)' : '元に戻す (Ctrl+Z)';
 
-  const name = hasDoc() ? (state.fileHandle?.name || model.store.name) : (state.preview ? state.preview.file.name : '文書が開かれていません');
+  const name = hasDoc() ? (state.fileHandle?.name || model.store.name) : '文書が開かれていません';
   $('#docName').textContent = name;
   $('#docName').title = name;
   const saveState = $('#saveState');
   const auto = getPref('autosave') && state.fileHandle;
-  saveState.textContent = !hasDoc() ? (state.preview ? '編集機能を準備中…' : '')
+  saveState.textContent = !hasDoc() ? ''
+    : state.preview ? (state.unsaved ? '● 未保存（保存は準備ができしだい）' : '保存・検索は準備中…')
     : state.unsaved ? (auto ? '● 変更あり（まもなく自動保存）' : '● 未保存の変更があります')
       : (auto ? '保存済み（自動保存オン）' : '保存済み');
   saveState.classList.toggle('dirty', state.unsaved);
@@ -913,7 +980,7 @@ function setToolButton(tool) {
 
 function selectTool(tool) {
   if (!hasDoc() && tool !== 'select') {
-    toast(state.preview ? '編集機能を準備しています。もう少しお待ちください' : '先にPDFを開いてください', 'warn');
+    toast('先にPDFを開いてください', 'warn');
     return;
   }
   flushEditing();

@@ -151,7 +151,13 @@ async function route(url, init) {
   }
   if (parts[0] !== 'doc' || parts.length < 2) return null;
 
-  const docId = parts[1];
+  let docId = parts[1];
+  if (docId === 'preview') {
+    // The document is on screen but the engine has not opened it yet: wait
+    // for that, then carry on with the id the engine gave it.
+    await window.pdfStudioAdopted;
+    docId = window.pdfStudioRealId;
+  }
   const rest = parts.slice(2);
   const base = { docId };
 
@@ -307,7 +313,12 @@ function installFetchShim() {
   window.fetch = async function pdfStudioFetch(input, init = {}) {
     const url = new URL(typeof input === 'string' ? input : input.url, window.location.href);
     if (url.pathname.startsWith('/api/')) {
-      const matched = await route(url, init);
+      let matched;
+      try {
+        matched = await route(url, init);
+      } catch (err) {
+        return resultToResponse({ status: 503, json: { detail: `この文書を編集用に開けませんでした（${err.message || err}）` } });
+      }
       if (!matched) {
         return new Response(JSON.stringify({ detail: `未対応の操作です: ${url.pathname}` }), {
           status: 404, headers: { 'Content-Type': 'application/json' },
