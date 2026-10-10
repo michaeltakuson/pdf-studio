@@ -20,6 +20,7 @@ export const state = {
   searchIndex: -1,
   searchQuery: '',
   fileHandle: null,     // File System Access handle of the opened/saved file, when the browser gives one
+  draftKey: null,       // where the crash-recovery copy of this document's markup is kept
   unsaved: false,       // changes not yet written to a file on disk
   pageSelection: new Set(),
   pageAnchor: 0,

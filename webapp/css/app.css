@@ -197,8 +197,12 @@ body[data-theme="dark"] .tab.file { color: #10203a; }
   flex: none;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  /* On a narrow window the ribbon scrolls sideways (wheel or swipe). A
+     visible scrollbar would sit on top of the group labels. */
+  scrollbar-width: none;
 }
+.ribbon::-webkit-scrollbar { display: none; }
+.ribbon.more-right { box-shadow: inset -26px 0 18px -18px rgba(30, 91, 184, .35); }
 .rgroup {
   display: flex; flex-direction: column;
   padding: 0 7px;

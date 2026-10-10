@@ -103,6 +103,7 @@ export function redo() {
 export const history = {
   get canUndo() { return undoStack.length > 0 || structuralDepth > 0; },
   get nextIsStructural() { return undoStack.length === 0 && structuralDepth > 0; },
+  get structuralDepth() { return structuralDepth; },
   get canRedo() { return redoStack.length > 0; },
 };
 
@@ -121,6 +122,17 @@ export function addAnnots(items, { select = true } = {}) {
     },
   }, 'add');
   return created;
+}
+
+/** Swap the whole set of annotations (restoring a recovered draft); undoable. */
+export function replaceAnnots(items) {
+  const next = (items || []).map(normalise);
+  const previous = store.annots;
+  const selection = store.selection;
+  run({
+    redo() { store.annots = next.map((a) => structuredClone(a)); store.selection = []; },
+    undo() { store.annots = previous; store.selection = selection; },
+  }, 'replace');
 }
 
 export function removeAnnots(ids) {

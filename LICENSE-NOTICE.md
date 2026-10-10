@@ -31,15 +31,21 @@ AGPL の義務が生じるのは、他人に配布したときとネットワー
 商用利用でソースを公開したくない場合は、Artifex から PyMuPDF の商用ライセンスを
 購入する必要があります（有償）。
 
-## 同梱している他のソフトのライセンス
+## 同梱・利用している他のソフトとフォント
 
-| ソフト | ライセンス | 備考 |
+| もの | ライセンス | 置き場所・備考 |
 |---|---|---|
-| PyMuPDF | AGPL-3.0 / 商用 | 上記のとおり。このアプリの制約はこれが決めている |
-| pdf.js | Apache-2.0 | `frontend/vendor/pdfjs/LICENSE` に全文あり。AGPL と両立する |
-| FastAPI / uvicorn | MIT / BSD | 制約なし |
-| Pillow | MIT-CMU | 制約なし |
-| Tesseract OCR | Apache-2.0 | 別途インストールするもので、同梱していない |
+| PyMuPDF（WebAssembly 版） | AGPL-3.0 / 商用 | `webapp/vendor/pymupdf-wasm/`。上記のとおり、このアプリの制約はこれが決めている |
+| pdf.js | Apache-2.0 | `webapp/vendor/pdfjs/`。`LICENSE` に全文あり。**削除しないでください**（著作権表示の保持にあたります） |
+| BIZ UDPGothic / BIZ UDPMincho | SIL Open Font License 1.1 | `webapp/vendor/fonts/`。© The BIZ UDGothic / UDMincho Project Authors（モリサワ） |
+| Zen Maru Gothic | SIL Open Font License 1.1 | 同上。© The Zen Maru Gothic Project Authors |
+| Klee One | SIL Open Font License 1.1 | 同上。© The Klee Project Authors（フォントワークス） |
+| Yomogi | SIL Open Font License 1.1 | 同上。© The Yomogi Project Authors |
+| Pyodide | MPL-2.0 | 同梱していない。起動時に CDN（jsDelivr）から読み込む |
+| fontTools | MIT | 同梱していない。文字を保存するときに Pyodide のパッケージとして読み込む |
+| tesseract.js と言語データ | Apache-2.0 | 同梱していない。文字認識（OCR）を初めて使うときに CDN から読み込む |
 
-pdf.js は Apache-2.0 なので、`frontend/vendor/pdfjs/LICENSE` を削除せずに残してください。
-これが著作権表示の保持にあたります。
+フォントの `OFL-*.txt`（ライセンス全文）は、フォントファイルと同じフォルダに置いたままにしてください。
+SIL OFL は、フォントを**文書に埋め込むこと**も、ソフトに**同梱して再配布すること**も認めています
+（フォント単体を販売することだけが禁じられています）。このアプリで作ったPDFに埋め込まれる文字の形について、
+利用者に追加の義務は生じません。

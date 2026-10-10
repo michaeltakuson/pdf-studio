@@ -33,6 +33,17 @@ export class Ribbon {
       button.addEventListener('click', () => this.setTab(tab.id));
       tabsEl.append(button);
     }
+    // A mouse wheel over the ribbon scrolls it sideways when it does not fit.
+    bodyEl.addEventListener('wheel', (event) => {
+      if (bodyEl.scrollWidth <= bodyEl.clientWidth || event.ctrlKey) return;
+      event.preventDefault();
+      bodyEl.scrollLeft += event.deltaY || event.deltaX;
+    }, { passive: false });
+    const hint = () => bodyEl.classList.toggle('more-right',
+      bodyEl.scrollWidth - bodyEl.clientWidth - bodyEl.scrollLeft > 4);
+    bodyEl.addEventListener('scroll', hint, { passive: true });
+    window.addEventListener('resize', hint);
+    this._hint = hint;
     this.setTab(this.active);
   }
 
@@ -79,6 +90,7 @@ export class Ribbon {
       this.bodyEl.append(wrap);
     }
     this.bodyEl.scrollLeft = scroll;
+    this._hint?.();
   }
 
   _item(item) {

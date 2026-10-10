@@ -161,6 +161,10 @@ export class ToolController extends EventTarget {
       return;
     }
     if (tool === 'select') { this._startSelect(view, point, event); return; }
+    // A resize handle works whatever tool is active: with the text tool
+    // still on, grabbing the edge of the box just typed must resize that box,
+    // not start drawing another one on top of it.
+    if (event.target.closest?.('[data-handle]')) { this._startSelect(view, point, event); return; }
     if (MARKUP_TOOLS.has(tool)) return; // the browser's own text selection does the work
     if (tool === 'edittext') { this._emit('text-line', { view, point, event }); return; }
 

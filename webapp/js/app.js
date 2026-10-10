@@ -19,6 +19,7 @@ import { TextEditor, fitRect, ensureFontLoaded, LINE_HEIGHT } from './textedit.j
 import { MARKUP_TOOLS, translated } from './tools.js';
 import { signatureDialog, hankoDialog, normaliseImage, fileToDataUrl } from './stamps.js';
 import * as ops from './docops.js';
+import { keyFor, saveDraft, loadDraft, clearDraft, pruneDrafts } from './drafts.js';
 
 for (const holder of document.querySelectorAll('[data-icon]')) {
   holder.innerHTML = iconSvg(holder.dataset.icon, holder.classList.contains('small') || holder.classList.contains('sb-btn') ? 16 : 18);
@@ -39,9 +40,11 @@ async function confirmDiscard() {
   });
 }
 
-async function adopt(data, { handle = null, message = null } = {}) {
+async function adopt(data, { handle = null, message = null, draftKey = null } = {}) {
   const previous = model.store.docId;
   flushEditing();
+  clearTimeout(draftTimer);
+  state.draftKey = draftKey;
   state.fileHandle = handle;
   state.toc = data.toc || [];
   state.pageSelection.clear();
@@ -68,6 +71,55 @@ async function adopt(data, { handle = null, message = null } = {}) {
     }
   } catch { /* storage blocked */ }
   toast(message || `${data.name} を開きました${resumed}`);
+  // Asked once the "opening…" indicator is out of the way; awaiting it here
+  // would leave the question sitting underneath the indicator, unanswerable.
+  setTimeout(() => offerDraft(data), 60);
+}
+
+// ---------------------------------------------------------------- crash recovery
+
+let draftTimer;
+
+/** Copy the markup into browser storage shortly after it changes. */
+function scheduleDraft() {
+  clearTimeout(draftTimer);
+  if (!state.draftKey || !hasDoc()) return;
+  draftTimer = setTimeout(() => {
+    if (!state.unsaved || model.history.structuralDepth > 0) return;
+    // A text box that is open and still empty is not content yet.
+    // Text still being typed lives in the editor, not the model yet.
+    const typing = state.editor && !state.editor.meta.isLine ? { id: state.editor.meta.id, text: state.editor.text } : null;
+    const keep = model.store.annots
+      .map((item) => (typing && item.id === typing.id ? { ...item, text: typing.text, contents: typing.text } : item))
+      .filter((item) => item.type !== 'freetext' || (item.text || '').length);
+    saveDraft(state.draftKey, structuredClone(keep), model.store.pages.length);
+  }, 2500);
+}
+
+async function offerDraft(data) {
+  const draft = await loadDraft(state.draftKey);
+  if (!draft || !draft.annots?.length || draft.pageCount !== model.store.pages.length) return;
+  const strip = (items) => JSON.stringify(items.map((item) => {
+    const { xref, modified, created, ...rest } = item;
+    void xref; void modified; void created;
+    return rest;
+  }));
+  if (strip(draft.annots) === strip(model.store.annots)) { clearDraft(state.draftKey); return; }
+  const when = new Date(draft.savedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const ok = await confirmDialog({
+    title: '保存されなかった書き込みがあります',
+    intro: `「${data.name}」には、${when} の時点で保存されないまま閉じられた書き込み（${draft.annots.length} 件）が、このブラウザに残っています。`,
+    confirmLabel: '復元する', cancelLabel: '破棄する',
+  });
+  if (!ok) { clearDraft(state.draftKey); return; }
+  model.replaceAnnots(draft.annots);
+  state.unsaved = true;
+  refreshAll();
+  // A box recovered mid-typing still has the size it had before the typing.
+  const texts = model.store.annots.filter((item) => item.type === 'freetext');
+  Promise.all(texts.map((item) => ensureFontLoaded(item.style?.font, item.text)))
+    .then(() => refitText(texts.map((item) => item.id)));
+  toast('書き込みを復元しました。Ctrl+S でファイルに保存してください');
 }
 
 function positionKey() {
@@ -107,6 +159,7 @@ async function openFile(file, password = '', handle = null) {
     // reader assume the protection travelled with it.
     await adopt(data, {
       handle,
+      draftKey: keyFor(file),
       message: data.wasProtected
         ? `${data.name} を開きました（保護を外した状態で編集します。保護を付け直すには「ファイル」→「パスワードを付けて書き出す」）`
         : null,
@@ -374,7 +427,7 @@ function endMergeWhenIdle(delay = 1200) {
 }
 
 model.subscribe((reason) => {
-  if (!['selection', 'document', 'saved', 'derived'].includes(reason)) state.unsaved = true;
+  if (!['selection', 'document', 'saved', 'derived'].includes(reason)) { state.unsaved = true; scheduleDraft(); }
   if (state.editor && !state.editor.meta.isLine) {
     const annot = model.byId(state.editor.meta.id);
     if (annot) state.editor.applyStyle(annot); else { state.editor.discard(); state.editor = null; }
@@ -435,6 +488,7 @@ function startTextEdit(id, { isNew = false, point = null } = {}) {
     },
   });
   editor.meta = { id, isNew };
+  editor.node.addEventListener('input', () => { state.unsaved = true; scheduleDraft(); });
   state.editor = editor;
   refreshOverlays();
   editor.focus({ point, selectAll: false });
@@ -618,18 +672,23 @@ function formatContext() {
   };
 }
 
+/**
+ * The font controls are always there, as in a word processor. With a text
+ * box selected (or open) they change it; otherwise they set what the next
+ * text box will look like.
+ */
 function fontGroup() {
-  const group = renderFontGroup(formatContext());
+  const context = formatContext();
+  const group = renderFontGroup(context);
   if (group) return group;
-  return h('div', { class: 'rhint', text: '「テキスト追加」を選ぶか、ページ上の文字をクリックすると、ここでフォント・サイズ・色を変えられます。' });
+  return renderFontGroup({
+    ...context, tool: 'freetext', selection: [],
+    onChange: (patch) => { remember('freetext', patch); ribbon.refresh(); },
+  });
 }
 
 function styleGroup() {
-  const group = renderStyleGroup(formatContext());
-  if (group) return group;
-  const context = formatContext();
-  if (renderFontGroup(context)) return null;
-  return h('div', { class: 'rhint', text: '図形・ペン・マーカーを選ぶか、ページ上の書き込みを選ぶと、ここで色や太さを変えられます。' });
+  return renderStyleGroup(formatContext());
 }
 
 // ================================================================ saving
@@ -677,6 +736,10 @@ async function saveToDisk({ saveAs = false } = {}) {
     }
     state.unsaved = false;
     model.markClean();
+    // What was at risk is now in a file; the recovery copy has done its job.
+    clearTimeout(draftTimer);
+    clearDraft(state.draftKey);
+    if (handle) { try { state.draftKey = keyFor(await handle.getFile()); } catch { state.draftKey = null; } }
     return true;
   } catch (err) {
     toast(`保存に失敗しました: ${err.message}${/NoModificationAllowed|locked|InvalidState/i.test(String(err.name)) ? '（ファイルが他のアプリで開かれていないか確認してください）' : ''}`, 'error');
@@ -1801,7 +1864,7 @@ const tabs = [
     { label: '図形', items: [{ col: ['line', 'arrow', 'polyline'] }, { col: ['square', 'circle', 'polygon'] }] },
     { label: '画像・印', items: [{ big: 'image' }, { big: 'hanko' }, { big: 'signature' }, { col: ['stamp', 'mark'] }] },
     { label: 'ページに入れる', items: [{ col: ['headerfooter', 'watermark', 'bates'] }] },
-    { label: 'フォント', items: [custom(() => renderFontGroup(formatContext()))] },
+    { label: 'フォント', items: [custom(fontGroup)] },
     { label: '書式', items: [custom(styleGroup)] },
   ] },
   { id: 'draw', label: '描画', groups: [
@@ -1979,6 +2042,7 @@ window.addEventListener('compositionstart', (e) => {
 selectTool('select');
 refreshAll();
 status('準備完了 — PDFを開いてください');
+pruneDrafts();
 document.addEventListener('pdfstudio:ready', () => {
   // Have the default face ready before the first text box is typed in.
   ensureFontLoaded({ family: 'gothic', size: 12 });
