@@ -17,7 +17,7 @@ import { Ribbon } from './ribbon.js';
 import { iconSvg } from './icons.js';
 import { TextEditor, fitRect, ensureFontLoaded, canBold, LINE_HEIGHT } from './textedit.js';
 import { MARKUP_TOOLS, ONE_SHOT, translated } from './tools.js';
-import { signatureDialog, hankoDialog, cropDialog, normaliseImage, fileToDataUrl } from './stamps.js';
+import { signatureDialog, hankoDialog, cropDialog, normaliseImage, loadImage, fileToDataUrl } from './stamps.js';
 import * as ops from './docops.js';
 import { keyFor, saveDraft, loadDraft, clearDraft, pruneDrafts } from './drafts.js';
 import { rememberFile, recentFiles, forgetFile, SNIPPET_FIELDS, loadSnippets, saveSnippets } from './recent.js';
@@ -1370,6 +1370,50 @@ async function insertImage(source, { at = null, points = null } = {}) {
   toast('画像を置きました。ドラッグで移動、角のハンドルで大きさを変えられます');
 }
 
+/**
+ * Turn a picture a quarter turn (a photo taken sideways, a scan fed in the
+ * wrong way). The pixels themselves are turned, so the file needs nothing
+ * special; the picture stays centred where it was.
+ */
+async function rotateImage(annot, clockwise = true) {
+  if (!annot || annot.type !== 'image' || !annot.image) return;
+  if (annot.flags?.locked) { toast('ロックされているため回転できません', 'warn'); return; }
+  let picture;
+  try {
+    picture = await loadImage(annot.image);
+  } catch {
+    toast('この画像は回転できませんでした', 'error');
+    return;
+  }
+  const current = model.byId(annot.id);
+  if (!current) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = picture.naturalHeight;
+  canvas.height = picture.naturalWidth;
+  const context = canvas.getContext('2d');
+  context.translate(canvas.width / 2, canvas.height / 2);
+  context.rotate((clockwise ? 1 : -1) * Math.PI / 2);
+  context.drawImage(picture, -picture.naturalWidth / 2, -picture.naturalHeight / 2);
+  const photo = /^data:image\/jpe?g/i.test(String(annot.image));
+  const image = photo ? canvas.toDataURL('image/jpeg', 0.95) : canvas.toDataURL('image/png');
+  const [x0, y0, x1, y1] = current.rect;
+  const cx = (x0 + x1) / 2; const cy = (y0 + y1) / 2;
+  let halfW = (y1 - y0) / 2; let halfH = (x1 - x0) / 2;
+  // Turned, it must still fit on its page.
+  const size = model.store.pages[current.page];
+  if (size) {
+    const fit = Math.min(1, (size.width - 4) / (halfW * 2), (size.height - 4) / (halfH * 2));
+    halfW *= fit; halfH *= fit;
+  }
+  let left = cx - halfW; let top = cy - halfH;
+  if (size) {
+    left = Math.max(2, Math.min(left, size.width - halfW * 2 - 2));
+    top = Math.max(2, Math.min(top, size.height - halfH * 2 - 2));
+  }
+  model.updateAnnots([annot.id], { image, rect: [left, top, left + halfW * 2, top + halfH * 2] });
+  refreshAll();
+}
+
 /** Keep only part of a picture that is already on the page. */
 async function cropImage(annot) {
   if (!annot || annot.type !== 'image' || !annot.image) return;
@@ -1835,6 +1879,8 @@ function placeSelectionBar() {
       ? barButton('edittext', '文字を編集', () => startTextEdit(single.id), { text: true }) : null,
     single && single.type === 'image' && single.image && !single.flags?.locked
       ? barButton('crop', '切り抜く（画像の一部だけを残す）', () => cropImage(single), { text: true }) : null,
+    single && single.type === 'image' && single.image && !single.flags?.locked
+      ? barButton('rotatecw', '右に90°回転', () => rotateImage(single, true)) : null,
     single && single.type !== 'freetext'
       ? barButton('comments', 'コメントを付ける', () => showRightPanel('props')) : null,
     sep(),
@@ -1936,6 +1982,10 @@ stage.addEventListener('contextmenu', (e) => {
         ? { label: '文字を編集', icon: 'edittext', action: () => startTextEdit(single.id) } : null,
       single && single.type === 'image' && single.image
         ? { label: '画像を切り抜く…', icon: 'crop', disabled: locked, action: () => cropImage(single) } : null,
+      single && single.type === 'image' && single.image
+        ? { label: '右に90°回転', icon: 'rotatecw', disabled: locked, action: () => rotateImage(single, true) } : null,
+      single && single.type === 'image' && single.image
+        ? { label: '左に90°回転', icon: 'rotateccw', disabled: locked, action: () => rotateImage(single, false) } : null,
       { label: '切り取り', icon: 'cut', key: 'Ctrl+X', disabled: locked, action: cutSelection },
       { label: 'コピー', icon: 'copy', key: 'Ctrl+C', action: copySelection },
       { label: '複製', icon: 'duplicate', key: 'Ctrl+D', action: duplicateSelection },
