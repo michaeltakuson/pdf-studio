@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pymupdf
 
-from .common import hex_to_rgb
+from .common import RAW_TEXT_ONLY, TEXT_ONLY, hex_to_rgb
 
 # ---------------------------------------------------------------- searching
 
@@ -28,12 +28,16 @@ def search_relaxed(page: pymupdf.Page, needle: str) -> list[pymupdf.Quad]:
     against the whitespace-stripped string, and rebuilds quads from the
     characters that matched.
     """
-    target = "".join(needle.split())
+    target = "".join(needle.split()).lower()
     if not target:
+        return []
+    # Walking a page character by character is slow, and most pages do not
+    # contain the phrase at all: rule those out with a plain-text check first.
+    if target not in "".join(page.get_text().split()).lower():
         return []
 
     chars: list[tuple[str, pymupdf.Rect]] = []
-    for block in page.get_text("rawdict").get("blocks", []):
+    for block in page.get_text("rawdict", flags=RAW_TEXT_ONLY).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -43,7 +47,8 @@ def search_relaxed(page: pymupdf.Page, needle: str) -> list[pymupdf.Quad]:
                     if glyph.strip():
                         chars.append((glyph, pymupdf.Rect(char["bbox"])))
 
-    haystack = "".join(c for c, _ in chars)
+    # Lower-casing must not change the length, or positions would drift.
+    haystack = "".join(c.lower() if len(c.lower()) == 1 else c for c, _ in chars)
     results: list[pymupdf.Quad] = []
     start = haystack.find(target)
     while start != -1:
@@ -74,7 +79,7 @@ def _union(rects: list[pymupdf.Rect]) -> pymupdf.Rect:
 def find_text_blocks(page: pymupdf.Page) -> list[dict]:
     """Editable text spans, with the geometry needed to replace them in place."""
     blocks = []
-    data = page.get_text("dict")
+    data = page.get_text("dict", flags=TEXT_ONLY)
     for block in data.get("blocks", []):
         if block.get("type") != 0:
             continue
@@ -97,7 +102,7 @@ def find_text_blocks(page: pymupdf.Page) -> list[dict]:
 def find_text_lines(page: pymupdf.Page) -> list[dict]:
     """Lines of body text, each with what is needed to retype it in place."""
     out = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in page.get_text("dict", flags=TEXT_ONLY).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):

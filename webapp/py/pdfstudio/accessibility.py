@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pymupdf
 
-from .common import rect_to_view
+from .common import TEXT_ONLY, rect_to_view
 
 # Structure types worth offering; the spec defines many more.
 TAG_TYPES = {
@@ -147,7 +147,7 @@ def autotag(doc: pymupdf.Document, *, language: str = "ja-JP") -> dict:
 
     sizes = []
     for page in doc:
-        for block in page.get_text("dict").get("blocks", []):
+        for block in page.get_text("dict", flags=TEXT_ONLY).get("blocks", []):
             if block.get("type") != 0:
                 continue
             for line in block.get("lines", []):
@@ -160,7 +160,7 @@ def autotag(doc: pymupdf.Document, *, language: str = "ja-JP") -> dict:
     body = max(set(sizes), key=sizes.count)
     structure = []
     for page in doc:
-        for block in page.get_text("dict").get("blocks", []):
+        for block in page.get_text("dict", flags=TEXT_ONLY).get("blocks", []):
             if block.get("type") != 0:
                 continue
             text = "".join(

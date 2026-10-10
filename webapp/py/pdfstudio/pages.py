@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pymupdf
 
-from .common import hex_to_rgb, rect_to_page
+from .common import TEXT_ONLY, hex_to_rgb, rect_to_page
 
 # The five boxes a PDF page can define. Cropping only touches CropBox, which is
 # why "trimming" never actually removes what falls outside it.
@@ -293,7 +293,7 @@ def auto_outline(doc: pymupdf.Document, limit: int = 500) -> list[list]:
     weight: Counter = Counter()
     lines: list[dict] = []
     for page in doc:
-        for block in page.get_text("dict").get("blocks", []):
+        for block in page.get_text("dict", flags=TEXT_ONLY).get("blocks", []):
             if block.get("type") != 0:
                 continue
             for line in block.get("lines", []):

@@ -5,6 +5,13 @@ import datetime
 import pymupdf
 
 
+# Structured text without the pictures. get_text("dict") hands back the bytes
+# of every image on the page along with the text unless told not to; on a
+# scanned or image-heavy page that turned a search into a minute-long wait.
+TEXT_ONLY = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+RAW_TEXT_ONLY = pymupdf.TEXTFLAGS_RAWDICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+
+
 def hex_to_rgb(value):
     if not value:
         return None
