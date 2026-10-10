@@ -684,3 +684,10 @@ body.present .annot-layer .hit, body.present .text-layer, body.present .form-lay
 }
 .float-bar .dot { width: 18px; height: 18px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, .25); padding: 0; cursor: pointer; margin: 0 2px; }
 .float-bar .dot:hover { transform: scale(1.2); }
+
+/* A finger or pen on an annotation, a handle or a text box frame drags that
+   thing; without this the browser takes the gesture as a page scroll. */
+.annot-layer .hit, .annot-layer .hit *, .handle, .ft-grip, .sig-pad { touch-action: none; }
+
+/* ---------------------------------------------------------------- two-page spread */
+.pages.spread { flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: flex-start; min-width: 0; margin: 0 auto; box-sizing: content-box; }

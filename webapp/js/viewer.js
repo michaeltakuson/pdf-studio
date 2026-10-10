@@ -353,7 +353,9 @@ export class Viewer extends EventTarget {
       // Fit the page being read, not page one: a document can mix portrait
       // and landscape pages.
       const target = this.pageViews[this.currentPage] || first;
-      const available = this.stage.clientWidth - padding;
+      // Side by side, each page gets half the width (less the gap between them).
+      const columns = this.spread ? 2 : 1;
+      const available = (this.stage.clientWidth - padding - (columns - 1) * 16) / columns;
       let scale = available / target.width;
       if (this.zoomMode === 'fit-page') {
         scale = Math.min(scale, (this.stage.clientHeight - padding) / target.height);
@@ -366,6 +368,14 @@ export class Viewer extends EventTarget {
     for (const view of this.pageViews) {
       this._layoutPage(view);
       view.rendered = false;
+    }
+    if (this.spread) {
+      // Exactly two pages per row at any zoom: the row is as wide as the two
+      // widest pages, and the stage scrolls sideways when that is too much.
+      const widest = Math.max(...this.pageViews.map((view) => view.width)) * this.scale;
+      this.container.style.width = `${Math.ceil(widest * 2 + 16)}px`;
+    } else {
+      this.container.style.width = '';
     }
     if (anchor) this.restore(anchor);
     clearTimeout(this._zoomTimer);
@@ -458,6 +468,13 @@ export class Viewer extends EventTarget {
   setCursor(name) {
     this.cursor = name || '';
     for (const view of this.pageViews) view.wrap.dataset.cursor = this.cursor;
+  }
+
+  /** Show pages two abreast, like an open book. */
+  setSpread(on) {
+    this.spread = !!on;
+    this.container.classList.toggle('spread', this.spread);
+    if (this.pageViews.length) this.setZoom(this.zoomMode.startsWith('fit') ? this.zoomMode : 'fit-width');
   }
 
   setInvert(on) {

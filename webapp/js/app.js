@@ -1305,6 +1305,33 @@ async function insertDate() {
   if (values) addTextBox(options[values.format]);
 }
 
+// ================================================================ arranging
+
+/** Line several selected things up, or space them evenly. */
+function arrange(how) {
+  const items = selectedAnnots().filter((a) => !a.flags?.locked);
+  if (items.length < 2) { toast('2つ以上選んでください（Shift を押しながらクリック、またはドラッグで囲む）', 'warn'); return; }
+  const merge = model.uid();
+  const move = (annot, dx, dy) => { if (dx || dy) model.updateAnnots([annot.id], translated(annot, dx, dy), { merge }); };
+  const edge = (index, pick) => pick(...items.map((a) => a.rect[index]));
+  if (how === 'left') { const x = edge(0, Math.min); for (const a of items) move(a, x - a.rect[0], 0); }
+  if (how === 'right') { const x = edge(2, Math.max); for (const a of items) move(a, x - a.rect[2], 0); }
+  if (how === 'top') { const y = edge(1, Math.min); for (const a of items) move(a, 0, y - a.rect[1]); }
+  if (how === 'bottom') { const y = edge(3, Math.max); for (const a of items) move(a, 0, y - a.rect[3]); }
+  if (how === 'spreadX' || how === 'spreadY') {
+    if (items.length < 3) { toast('等間隔にするには3つ以上選んでください', 'warn'); return; }
+    const i = how === 'spreadX' ? 0 : 1;
+    const sorted = [...items].sort((p, q) => p.rect[i] - q.rect[i]);
+    const first = sorted[0].rect[i];
+    const last = sorted[sorted.length - 1].rect[i];
+    sorted.forEach((annot, n) => {
+      const want = first + ((last - first) * n) / (sorted.length - 1);
+      move(annot, i === 0 ? want - annot.rect[0] : 0, i === 1 ? want - annot.rect[1] : 0);
+    });
+  }
+  model.endMerge();
+}
+
 // ================================================================ snippets
 
 async function editSnippets() {
@@ -1356,6 +1383,8 @@ async function startSlideshow() {
   hideSelectionBar();
   present.on = true;
   present.zoom = viewer.zoomMode;
+  present.spread = viewer.spread;
+  if (viewer.spread) viewer.setSpread(false);
   const start = viewer.currentPage;
   present.bar = document.createElement('div');
   present.bar.className = 'present-bar';
@@ -1376,7 +1405,12 @@ function stopSlideshow() {
   present.laser = null;
   for (const view of viewer.pageViews) view.wrap.classList.remove('showing');
   if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
-  setTimeout(() => { viewer.setZoom(present.zoom, { keep: false }); viewer.scrollToPage(at); refreshAll(); }, 120);
+  setTimeout(() => {
+    if (present.spread) viewer.setSpread(true);
+    viewer.setZoom(present.zoom, { keep: false });
+    viewer.scrollToPage(at);
+    refreshAll();
+  }, 120);
 }
 
 document.addEventListener('fullscreenchange', () => {
@@ -1710,6 +1744,16 @@ stage.addEventListener('contextmenu', (e) => {
       { label: '複製', icon: 'duplicate', key: 'Ctrl+D', action: duplicateSelection },
       { label: '削除', icon: 'trash', key: 'Delete', disabled: locked, danger: true, action: deleteSelection },
       '-',
+      ...(selection.length > 1 ? [
+        { heading: `${selection.length} 件をそろえる` },
+        { label: '左をそろえる', icon: 'alignleft', action: () => arrange('left') },
+        { label: '上をそろえる', icon: 'moveup', action: () => arrange('top') },
+        { label: '右をそろえる', icon: 'alignright', action: () => arrange('right') },
+        { label: '下をそろえる', icon: 'movedown', action: () => arrange('bottom') },
+        { label: '横に等間隔', action: () => arrange('spreadX') },
+        { label: '縦に等間隔', action: () => arrange('spreadY') },
+        '-',
+      ] : []),
       { label: locked ? 'ロックを解除' : 'ロック（動かせなくする）', icon: 'lock',
         action: () => model.updateAnnots(selection.map((a) => a.id), { flags: { locked: !locked } }) },
       { label: 'コメント・プロパティ…', icon: 'comments', action: () => showRightPanel('props') },
@@ -2333,9 +2377,13 @@ const commands = {
   actual: { label: '100%', icon: 'actual', run: () => viewer.setZoom('1'), ...needsDoc },
   thumbs: { label: 'ページ一覧', icon: 'thumbs', run: () => toggleSide('#leftPanel'), active: () => !$('#leftPanel').classList.contains('collapsed') },
   sidepane: { label: '右パネル', icon: 'sidepane', title: 'コメント・プロパティのパネル', run: () => toggleSide('#rightPanel'), active: () => !$('#rightPanel').classList.contains('collapsed') },
+  spread: { label: '見開き', icon: 'spread', title: '見開き表示（2ページを並べて表示。本や楽譜に）',
+    run: () => { setPref('spread', !getPref('spread')); viewer.setSpread(getPref('spread')); ribbon.refresh(); },
+    active: () => !!getPref('spread'), ...needsDoc },
   theme: { label: 'ダークモード', icon: 'theme', run: toggleTheme, active: () => document.body.dataset.theme === 'dark' },
   invert: { label: 'ページも暗く', icon: 'invert', title: 'ページの白黒を反転（夜に読むとき。保存されるPDFは変わりません）',
-    run: () => { setPref('invert', !getPref('invert')); viewer.setInvert(getPref('invert')); ribbon.refresh(); }, active: () => !!getPref('invert') },
+    run: () => { setPref('invert', !getPref('invert')); viewer.setInvert(getPref('invert'));
+viewer.setSpread(getPref('spread')); ribbon.refresh(); }, active: () => !!getPref('invert') },
   fullscreen: { label: '全画面', icon: 'fullscreen', key: 'F11', run: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.()) },
   speak: { label: '読み上げ', icon: 'speak', title: '今のページ（または選んだ文字）を読み上げる', run: readAloud, active: () => speaking, ...needsDoc },
   find: { label: '検索', icon: 'search', key: 'Ctrl+F', run: () => { $('#searchInput').focus(); $('#searchInput').select(); }, ...needsDoc },
@@ -2413,7 +2461,7 @@ const tabs = [
     { label: '書式', items: [custom(styleGroup)] },
   ] },
   { id: 'view', label: '表示', groups: [
-    { label: 'ズーム', items: [{ big: 'fitwidth' }, { col: ['fitpage', 'actual'] }, { col: ['zoomin', 'zoomout'] }] },
+    { label: 'ズーム', items: [{ big: 'fitwidth' }, { col: ['fitpage', 'actual', 'spread'] }, { col: ['zoomin', 'zoomout'] }] },
     { label: 'パネル', items: [{ col: ['thumbs', 'sidepane', 'comments'] }] },
     { label: '見やすさ', items: [{ col: ['theme', 'invert', 'fullscreen'] }] },
     { label: '読む・覚える・見せる', items: [{ big: 'slideshow' }, { big: 'study' }, { big: 'speak' }, { col: ['find', 'pan', 'snapshot'] }] },

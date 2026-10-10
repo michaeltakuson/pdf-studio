@@ -76,6 +76,13 @@ export class ToolController extends EventTarget {
       if (active && active !== document.body && !active.closest?.('.ft-host, .note-editor')) active.blur?.();
       window.getSelection()?.removeAllRanges();
     });
+    // A finger on an annotation or a handle drags it. CSS touch-action is not
+    // honoured on shapes inside an SVG, so the scroll is refused here instead;
+    // a finger anywhere else on the page still scrolls as usual.
+    stage.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      if (e.target.closest?.('.annot-layer .hit, .handle')) e.preventDefault();
+    }, { passive: false });
     document.addEventListener('pointerup', () => {
       if (MARKUP_TOOLS.has(this.tool)) setTimeout(() => this.markupSelection(), 0);
     });

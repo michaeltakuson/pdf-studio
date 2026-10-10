@@ -177,22 +177,30 @@ export function updateAnnots(ids, patch, { merge = null } = {}) {
 
   const last = undoStack[undoStack.length - 1];
   if (merge && last && last.mergeToken && last.mergeToken === merge) {
+    // One gesture may touch several annotations in separate calls (dragging
+    // a multiple selection moves them one by one). Each keeps its own
+    // "before", taken the first time the gesture touches it — otherwise undo
+    // would put back only the first of them.
+    for (const target of targets) {
+      if (!last.before.has(target.id)) last.before.set(target.id, structuredClone(target));
+    }
     applyPatch(targets, patch);
-    last.after = ids.map(byId).filter(Boolean).map((a) => structuredClone(a));
+    for (const target of targets) last.after.set(target.id, structuredClone(byId(target.id)));
     store.dirty = true;
     emit('change');
     return;
   }
 
-  const before = targets.map((a) => structuredClone(a));
+  const before = new Map(targets.map((a) => [a.id, structuredClone(a)]));
   applyPatch(targets, patch);
-  const after = ids.map(byId).filter(Boolean).map((a) => structuredClone(a));
+  const after = new Map(ids.map(byId).filter(Boolean).map((a) => [a.id, structuredClone(a)]));
 
   undoStack.push({
     mergeToken: merge || null,
+    before,
     after,
-    redo() { restore(this.after); },
-    undo() { restore(before); },
+    redo() { restore([...this.after.values()]); },
+    undo() { restore([...this.before.values()]); },
   });
   redoStack = [];
   store.dirty = true;
@@ -209,9 +217,8 @@ export function silentUpdate(id, patch) {
   if (!target) return;
   deepAssign(target, patch);
   for (const command of undoStack) {
-    for (const snapshot of command.after || []) {
-      if (snapshot.id === id) deepAssign(snapshot, structuredClone(patch));
-    }
+    const snapshot = command.after?.get?.(id);
+    if (snapshot) deepAssign(snapshot, structuredClone(patch));
   }
   emit('derived');
 }
