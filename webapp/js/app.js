@@ -621,7 +621,15 @@ async function buildFormLayer() {
       let sent = control.value;
       const commit = () => { if (control.value !== sent) { sent = control.value; send(field.name, sent); } };
       control.addEventListener('blur', commit);
-      control.addEventListener('input', () => { state.unsaved = true; clearTimeout(formTimer); formTimer = setTimeout(commit, 1500); });
+      control.addEventListener('input', () => {
+        if (!state.unsaved) {
+          // Say so at once; the panels are only rebuilt when the value is sent.
+          state.unsaved = true;
+          $('#saveState').textContent = '● 未保存の変更があります';
+          $('#saveState').classList.add('dirty');
+        }
+        clearTimeout(formTimer); formTimer = setTimeout(commit, 1500);
+      });
       control.addEventListener('keydown', (event) => {
         if (isAppShortcut(event)) { commit(); return; }
         event.stopPropagation();
