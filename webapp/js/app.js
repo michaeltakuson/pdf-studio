@@ -919,18 +919,18 @@ tools.addEventListener('region', async (e) => {
   tools.setTool('select');
   if (which === 'snapshot') { copyRegion(view, rect); return; }
   const values = await formDialog({
-    title: 'この範囲に切り取る（トリミング）',
+    title: 'この範囲でトリミングする',
     intro: '囲んだ範囲だけが見えるようにします。余白の多い資料を大きく表示・印刷したいときに。',
     warning: '範囲の外は見えなくなるだけで、ファイルには残ります。本当に消すには墨消しを使ってください。Ctrl+Z で戻せます。',
     fields: [{ key: 'scope', label: '対象', type: 'select', options: {
       one: `${view.index + 1} ページ目だけ`, all: 'すべてのページ（同じ範囲）',
     } }],
-    confirmLabel: '切り取る',
+    confirmLabel: 'トリミング',
   });
   if (!values) return;
   const pages = values.scope === 'all' ? model.store.pages.map((_, i) => i) : [view.index];
   const result = await structural('/pages/crop', { pages, rect }, { label: 'トリミング' });
-  if (result) toast('切り取りました（Ctrl+Z で戻せます。「ページ」→「切り取りを解除」でも戻ります）');
+  if (result) toast('トリミングしました（Ctrl+Z で戻せます。「ページ」→「トリミングを解除」でも戻ります）');
 });
 
 /** Copy a region of the page, markup included, to the clipboard as a picture. */
@@ -2584,7 +2584,7 @@ const commands = {
   remove: { label: '削除', icon: 'trash', key: 'Delete', run: deleteSelection, ...needsSelection },
   // pointer
   select: tool('select', '選択', 'select', { title: '選択（書き込みを選ぶ・動かす／文字を選ぶ）', key: 'Esc' }),
-  pan: tool('pan', '手のひら', 'pan', { title: '手のひら（ドラッグでページを動かす）' }),
+  pan: tool('pan', '画面移動', 'pan', { title: '画面移動（手のひらツール。ドラッグで画面を動かす）' }),
   // text
   freetext: tool('freetext', 'テキスト追加', 'text', { short: 'テキスト\n追加', title: 'テキスト追加（クリックした場所に文字を書き込む）' }),
   edittext: tool('edittext', '本文を編集', 'edittext', { short: '本文を\n編集', title: '本文を編集（PDFに元からある文字を書き換える）' }),
@@ -2600,12 +2600,12 @@ const commands = {
   pen: tool('pen', 'ペン', 'pen'),
   marker: tool('marker', '蛍光ペン', 'marker', { title: '蛍光ペン（フリーハンド）' }),
   eraser: tool('eraser', '消しゴム', 'eraser', { title: '消しゴム（手書きの線をなぞって消す）' }),
-  lasso: tool('lasso', '投げ縄', 'lasso', { title: '投げ縄（囲んだ中の書き込みをまとめて選ぶ）' }),
+  lasso: tool('lasso', 'なげなわ選択', 'lasso', { title: 'なげなわ選択（囲んだ中の書き込みをまとめて選ぶ）' }),
   // shapes
   line: tool('line', '直線', 'line'),
   arrow: tool('arrow', '矢印', 'arrow'),
   square: tool('square', '四角形', 'square'),
-  circle: tool('circle', '円・だ円', 'circle'),
+  circle: tool('circle', '円・楕円', 'circle'),
   polygon: tool('polygon', '多角形', 'polygon'),
   polyline: tool('polyline', '折れ線', 'polyline'),
   // inserts
@@ -2617,8 +2617,8 @@ const commands = {
   mark: tool('mark', 'チェック', 'check', { title: 'チェック・バツ・丸（申込書などの記入に。クリックした場所に置く）' }),
   whiteout: tool('whiteout', '修正テープ', 'whiteout', { title: '修正テープ（囲んだところを紙の色で隠す。上から書き直せます。隠すだけで、文字はファイルに残ります）' }),
   snapshot: tool('snapshot', '切り抜きコピー', 'snapshot', { short: '切り抜き\nコピー', title: '切り抜きコピー（囲んだ範囲を画像としてコピー。図や表をレポート・ノートに貼るときに）' }),
-  crop: tool('crop', '切り取り', 'crop', { title: 'トリミング（囲んだ範囲だけを表示する）' }),
-  uncrop: { label: '切り取りを解除', icon: 'crop', title: 'トリミングを解除して、ページ全体を表示する',
+  crop: tool('crop', 'トリミング', 'crop', { title: 'トリミング（囲んだ範囲だけを表示する）' }),
+  uncrop: { label: 'トリミングを解除', icon: 'crop', title: 'トリミングを解除して、ページ全体を表示する',
     run: async () => { const r = await structural('/pages/reset-crop', { pages: model.store.pages.map((_, i) => i) }, { label: '解除' }); if (r) toast('ページ全体の表示に戻しました'); }, ...needsDoc },
   study: { label: '暗記シート', icon: 'study', title: '暗記シート（マーカーを引いたところを隠す。クリックで答え合わせ）', run: toggleStudy, active: () => state.study, ...needsDoc },
   dictate: { label: '音声入力', icon: 'mic', title: '音声入力（話した言葉をテキストボックスに入力。Chrome / Edge）', run: toggleDictation,
@@ -2676,15 +2676,15 @@ const commands = {
   zoomin: { label: '拡大', icon: 'zoomin', key: 'Ctrl++', run: () => viewer.nudgeZoom(1), ...needsDoc },
   zoomout: { label: '縮小', icon: 'zoomout', key: 'Ctrl+−', run: () => viewer.nudgeZoom(-1), ...needsDoc },
   fitwidth: { label: '幅に合わせる', icon: 'fitwidth', key: 'Ctrl+0', run: () => viewer.setZoom('fit-width'), active: () => viewer.zoomMode === 'fit-width', ...needsDoc },
-  fitpage: { label: '全体表示', icon: 'fitpage', run: () => viewer.setZoom('fit-page'), active: () => viewer.zoomMode === 'fit-page', ...needsDoc },
+  fitpage: { label: 'ページ全体', icon: 'fitpage', run: () => viewer.setZoom('fit-page'), active: () => viewer.zoomMode === 'fit-page', ...needsDoc },
   actual: { label: '100%', icon: 'actual', run: () => viewer.setZoom('1'), ...needsDoc },
   thumbs: { label: 'ページ一覧', icon: 'thumbs', run: () => toggleSide('#leftPanel'), active: () => !$('#leftPanel').classList.contains('collapsed') },
-  sidepane: { label: '右パネル', icon: 'sidepane', title: 'コメント・プロパティのパネル', run: () => toggleSide('#rightPanel'), active: () => !$('#rightPanel').classList.contains('collapsed') },
+  sidepane: { label: 'サイドパネル', icon: 'sidepane', title: 'コメント・プロパティのパネル', run: () => toggleSide('#rightPanel'), active: () => !$('#rightPanel').classList.contains('collapsed') },
   spread: { label: '見開き', icon: 'spread', title: '見開き表示（2ページを並べて表示。本や楽譜に）',
     run: () => { setPref('spread', !getPref('spread')); viewer.setSpread(getPref('spread')); ribbon.refresh(); },
     active: () => !!getPref('spread'), ...needsDoc },
   theme: { label: 'ダークモード', icon: 'theme', run: toggleTheme, active: () => document.body.dataset.theme === 'dark' },
-  invert: { label: 'ページも暗く', icon: 'invert', title: 'ページの白黒を反転（夜に読むとき。保存されるPDFは変わりません）',
+  invert: { label: 'ページの色を反転', icon: 'invert', title: 'ページの白黒を反転（夜に読むとき。保存されるPDFは変わりません）',
     run: () => { setPref('invert', !getPref('invert')); viewer.setInvert(getPref('invert'));
 viewer.setSpread(getPref('spread')); ribbon.refresh(); }, active: () => !!getPref('invert') },
   fullscreen: { label: '全画面', icon: 'fullscreen', key: 'F11', run: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.()) },
@@ -2710,8 +2710,8 @@ viewer.setSpread(getPref('spread')); ribbon.refresh(); }, active: () => !!getPre
   takeoff: { label: '集計', icon: 'order', title: '計測とカウントの集計', run: () => showRightPanel('takeoff') },
   ocr: { label: '文字認識', icon: 'ocr', short: '文字認識\n(OCR)', title: 'スキャンした文書を文字認識して、検索・選択できるようにする', run: runOcr, ...needsDoc },
   protect: { label: 'パスワード保護', icon: 'lock', title: 'パスワードを付けて書き出す', run: ops.protectDocument, ...needsDoc },
-  compress: { label: '軽くする', icon: 'compress', title: 'ファイルサイズを小さくする', run: ops.compressDocument, ...needsDoc },
-  a11y: { label: '点検', icon: 'accessibility', title: 'アクセシビリティを点検する', run: ops.runAccessibilityAudit, ...needsDoc },
+  compress: { label: '圧縮', icon: 'compress', title: 'ファイルを圧縮（ファイルサイズを小さくする）', run: ops.compressDocument, ...needsDoc },
+  a11y: { label: 'チェック', icon: 'accessibility', title: 'アクセシビリティ チェック（読み上げソフトで読める文書かを確かめる）', run: ops.runAccessibilityAudit, ...needsDoc },
   readorder: { label: '読み上げ順', icon: 'order', title: '読み上げ順序を確認する', run: ops.showReadingOrder, ...needsDoc },
   sigfield: { label: '電子署名欄', icon: 'signature', menu: true, ...needsDoc,
     run: (e, button) => openMenu(button, [

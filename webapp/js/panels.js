@@ -56,7 +56,7 @@ const STANDARD_STAMPS = [
   'DEPARTMENTAL（部門用）', 'EXPERIMENTAL（試験的）', 'EXPIRED（期限切れ）',
   'FINAL（最終版）', 'FOR COMMENT（コメント用）', 'FOR PUBLIC RELEASE（公開可）',
   'NOT APPROVED（未承認）', 'NOT FOR PUBLIC RELEASE（公開不可）', 'SOLD（売却済）',
-  'TOP SECRET（最高機密）', 'DRAFT（ドラフト）',
+  'TOP SECRET（最高機密）', 'DRAFT（下書き）',
 ];
 
 const FONT_SIZES = [8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72];

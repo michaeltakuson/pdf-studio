@@ -614,7 +614,7 @@ const SEVERITY = { high: '重要', medium: '中', low: '軽微' };
 export async function runAccessibilityAudit() {
   const report = await (await fetch(docUrl('/accessibility'))).json();
   if (report.passed) {
-    await infoDialog({ title: 'アクセシビリティ点検', intro: '問題は見つかりませんでした。タグ・言語・代替テキストがそろっています。' });
+    await infoDialog({ title: 'アクセシビリティ チェック', intro: '問題は見つかりませんでした。タグ・言語・代替テキストがそろっています。' });
     return;
   }
   const body = report.issues
