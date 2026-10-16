@@ -456,8 +456,14 @@ class DocxFromPdf:
         if n + 1 >= len(self.pages):
             return False
         a, b = self.doc[self.pages[n]], self.doc[self.pages[n + 1]]
-        return (abs(a.rect.width - b.rect.width) > 1 or abs(a.rect.height - b.rect.height) > 1
-                or self._cheap_scanned(a) or self._cheap_scanned(b))
+        if (abs(a.rect.width - b.rect.width) > 1 or abs(a.rect.height - b.rect.height) > 1
+                or self._cheap_scanned(a) or self._cheap_scanned(b)):
+            return True
+        # Text only runs on into the next page when this page is full. A slide, or the last page of a chapter, stops
+        # part way down and the next page starts something new, so that page break stays where it was.
+        H = a.rect.height
+        bottoms = [blk[3] for blk in a.get_text("blocks") if blk[6] == 0 and blk[4].strip() and blk[3] < H * 0.91]
+        return not bottoms or max(bottoms) < H * 0.80
 
     # ---- main
     def convert(self) -> bytes:
@@ -521,7 +527,7 @@ class DocxFromPdf:
         vertical = any(ln.vertical for ln in lines)
         x0, y0, x1, y1 = block.bbox
         # a one-line frame must not wrap when the reader's font is a little wider than the original
-        width = (x1 - x0) * (1.15 if len(lines) == 1 else 1.08) + (8 if len(lines) == 1 else 4)
+        width = (x1 - x0) * 1.25 + 10      # room for a font that sets the same text a little wider; the box itself is invisible
         pitch = None
         if len(lines) >= 2:
             pitch = (lines[-1].bbox[1] - lines[0].bbox[1]) / (len(lines) - 1)

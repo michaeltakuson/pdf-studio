@@ -518,7 +518,9 @@ export async function pdfToOffice(fmt) {
   fields.push({ key: 'ranges', label: '範囲', placeholder: '例: 1-3, 5, 8-', showWhen: (v) => v.scope === 'ranges' });
   if (fmt === 'docx') {
     fields.push({
-      key: 'mode', label: '変換のしかた', type: 'select', options: {
+      key: 'mode', label: '変換のしかた', type: 'select',
+      // slides (wide pages) do not read as running text: keep them as they look unless the person asks otherwise
+      value: (model.store.pages[0]?.width || 0) > (model.store.pages[0]?.height || 1) * 1.25 ? 'layout' : 'flow', options: {
         flow: '文章として編集しやすく（段落・表・見出しを作り直す）',
         layout: '見た目をそのまま（図や罫線は画像、文字は位置どおりの枠）',
       },
