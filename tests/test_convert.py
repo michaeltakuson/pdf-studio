@@ -33,6 +33,23 @@ def main():
     zipped = convert.split_by_size(doc, "s", 10 ** 9)
     assert zipped[:2] == b"PK"
     assert convert.sniff("x.bin", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") == "ole"
+    # a phone photo stored sideways (EXIF orientation 6) comes out turned upright
+    try:
+        from PIL import Image
+        import io as _io
+        im = Image.new("RGB", (200, 100), (255, 0, 0))
+        ex = im.getexif()
+        ex[274] = 6
+        buf = _io.BytesIO()
+        im.save(buf, "JPEG", exif=ex)
+        jpeg = buf.getvalue()
+        assert convert.exif_orientation(jpeg) == 6
+        pdf_bytes = convert.images_to_pdf([("p.jpg", jpeg)], paper="fit")
+        page = pymupdf.open("pdf", pdf_bytes)[0]
+        assert page.rect.height > page.rect.width, page.rect   # 200x100 turned a quarter: now taller than wide
+    except ImportError:
+        pass
+
     print("convert tests passed")
 
 

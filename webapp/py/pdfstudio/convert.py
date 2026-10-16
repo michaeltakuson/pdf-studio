@@ -203,9 +203,43 @@ PAPER_SIZES = {"a4": (595.3, 841.9), "a3": (841.9, 1190.6), "a5": (419.5, 595.3)
                "letter": (612, 792), "legal": (612, 1008)}
 
 
+def exif_orientation(data: bytes) -> int:
+    """The camera's orientation tag (1..8) of a JPEG, or 1 when there is none. Phone photos are stored sideways."""
+    if len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:   # JPEG start of image
+        return 1
+    i = 2
+    n = len(data)
+    while i + 4 <= n and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xDA or marker == 0xD9:
+            break
+        size = int.from_bytes(data[i + 2:i + 4], "big")
+        if marker == 0xE1 and data[i + 4:i + 8] == b"Exif" and data[i + 8] == 0 and data[i + 9] == 0:
+            tiff = data[i + 10:i + 2 + size]
+            if len(tiff) < 8:
+                return 1
+            order = "little" if tiff[:2] == b"II" else "big" if tiff[:2] == b"MM" else None
+            if order is None:
+                return 1
+            ifd = int.from_bytes(tiff[4:8], order)
+            if ifd + 2 > len(tiff):
+                return 1
+            count = int.from_bytes(tiff[ifd:ifd + 2], order)
+            for k in range(count):
+                entry = tiff[ifd + 2 + 12 * k: ifd + 14 + 12 * k]
+                if len(entry) < 12:
+                    break
+                if int.from_bytes(entry[:2], order) == 0x0112:
+                    value = int.from_bytes(entry[8:10], order)
+                    return value if 1 <= value <= 8 else 1
+            return 1
+        i += 2 + size
+    return 1
+
+
 def images_to_pdf(files: list[tuple[str, bytes]], *, orientation: str = "auto", paper: str = "a4", margin: float = 18.0) -> bytes:
     """One page per picture. ``paper`` 'fit' makes each page the size of its picture; ``orientation`` portrait,
-    landscape, or auto (turned to suit the picture)."""
+    landscape, or auto (turned to suit the picture). A photo is turned the way its camera tag says."""
     out = pymupdf.open()
     for name, data in files:
         try:
@@ -213,19 +247,23 @@ def images_to_pdf(files: list[tuple[str, bytes]], *, orientation: str = "auto", 
         except Exception as exc:
             raise ValueError(f"{name} は画像として読めませんでした") from exc
         w_px, h_px = pix.width, pix.height
-        # honour the camera's rotation tag where MuPDF reports it
+        # a phone stores the picture as the sensor saw it and notes how to hold it; mirrored variants are left alone
+        turn = {3: 180, 6: 90, 8: 270}.get(exif_orientation(data), 0)
+        if turn in (90, 270):
+            w_px, h_px = h_px, w_px
+        rotate = (360 - turn) % 360          # insert_image turns anti-clockwise
         if paper == "fit":
             width, height = w_px * 0.75, h_px * 0.75
             width, height = max(width, 36), max(height, 36)
             page = out.new_page(width=width, height=height)
-            page.insert_image(pymupdf.Rect(0, 0, width, height), stream=data, keep_proportion=False)
+            page.insert_image(pymupdf.Rect(0, 0, width, height), stream=data, keep_proportion=False, rotate=rotate)
             continue
         pw, ph = PAPER_SIZES.get(paper, PAPER_SIZES["a4"])
         landscape = (w_px > h_px) if orientation == "auto" else orientation == "landscape"
         width, height = (ph, pw) if landscape else (pw, ph)
         page = out.new_page(width=width, height=height)
         box = pymupdf.Rect(margin, margin, width - margin, height - margin)
-        page.insert_image(box, stream=data, keep_proportion=True)
+        page.insert_image(box, stream=data, keep_proportion=True, rotate=rotate)
     result = out.tobytes(garbage=3, deflate=True)
     out.close()
     return result
