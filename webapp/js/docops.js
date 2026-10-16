@@ -118,15 +118,14 @@ export async function splitDocument() {
       { key: 'mode', label: '分け方', type: 'select', options: {
         every: '決まったページ数ごと', ranges: 'ページ範囲を指定', size: 'ファイルサイズごと（メール添付の上限などに）',
       } },
-      { key: 'every', label: '何ページごと', type: 'number', value: 1, min: 1, max: Math.max(1, count), hint: '「決まったページ数ごと」を選んだとき' },
-      { key: 'ranges', label: 'ページ範囲', placeholder: '例: 1-3, 4-10, 11-', hint: '「ページ範囲を指定」のとき。カンマ区切りの1つ1つが別のPDFになります' },
-      { key: 'single', label: '範囲を1つのPDFにまとめる', type: 'checkbox', hint: '指定したページだけを、1つのPDFにします（分割ではなく、抜き出し）' },
-      { key: 'sizeMB', label: '1ファイルの上限（MB）', type: 'number', value: 10, min: 0.1, step: 0.5, hint: '「ファイルサイズごと」のとき。1ページがこれより大きいときは、そのページだけで1ファイルになります' },
+      { key: 'every', label: '何ページごと', type: 'number', value: 1, min: 1, max: Math.max(1, count), showWhen: (v) => v.mode === 'every' },
+      { key: 'ranges', label: 'ページ範囲', placeholder: '例: 1-3, 4-10, 11-', hint: 'カンマ区切りの1つ1つが別のPDFになります', showWhen: (v) => v.mode === 'ranges' },
+      { key: 'single', label: '範囲を1つのPDFにまとめる', type: 'checkbox', hint: '指定したページだけを、1つのPDFにします（分割ではなく、抜き出し）', showWhen: (v) => v.mode === 'ranges' },
+      { key: 'sizeMB', label: '1ファイルの上限（MB）', type: 'number', value: 10, min: 0.1, step: 0.5, hint: '1ページがこれより大きいときは、そのページだけで1ファイルになります', showWhen: (v) => v.mode === 'size' },
     ],
     validate: (v) => {
       if (v.mode === 'ranges' && !v.ranges.trim()) return 'ページ範囲を入力してください';
       if (v.mode === 'size' && !(v.sizeMB > 0)) return '上限のサイズ（MB）を入力してください';
-      if (v.single && v.mode !== 'ranges') return '「範囲を1つのPDFにまとめる」は、分け方を「ページ範囲を指定」にしたときに使います';
       return null;
     },
     confirmLabel: '書き出す',
@@ -215,7 +214,7 @@ export async function exportImages() {
       { key: 'scope', label: '対象', type: 'select', options: { picked: describePages(pages), all: `すべてのページ（${model.store.pages.length}）` } },
       { key: 'format', label: '形式', type: 'select', options: { png: 'PNG（くっきり）', jpg: 'JPEG（軽い）' } },
       { key: 'dpi', label: '解像度', type: 'select', value: '150', options: { 96: '96 dpi（画面用）', 150: '150 dpi（標準）', 200: '200 dpi', 300: '300 dpi（印刷用）' } },
-      { key: 'quality', label: 'JPEGの画質', type: 'select', value: '85', options: { 70: '標準（軽い）', 85: '高画質', 95: '最高画質' }, hint: 'JPEGを選んだときに使います' },
+      { key: 'quality', label: 'JPEGの画質', type: 'select', value: '85', options: { 70: '標準（軽い）', 85: '高画質', 95: '最高画質' }, showWhen: (v) => v.format === 'jpg' },
     ],
     confirmLabel: '書き出す',
   });

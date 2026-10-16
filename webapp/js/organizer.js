@@ -96,6 +96,7 @@ function run() {
     const btnDel = button('pagedelete', '削除', () => remove(), { key: 'Delete' });
     const btnUp = button('moveup', '前へ', () => nudge(-1), { title: '選んだページを1つ前へ', key: 'Alt+←' });
     const btnDown = button('movedown', '後ろへ', () => nudge(1), { title: '選んだページを1つ後ろへ', key: 'Alt+→' });
+    const btnReverse = button('order', '逆順', () => reverse(), { title: '選んだページ（選んでいなければ全ページ）の並びを逆にする' });
     const btnBlank = button('pageblank', '白紙を追加', () => addBlank());
     const btnFile = button('merge', 'PDFを追加…', () => addFromFiles(), { title: '別のPDFのページを、選んだページのあと（なければ最後）に入れる' });
     const btnUndo = button('undo', '元に戻す', undo, { key: 'Ctrl+Z' });
@@ -129,7 +130,7 @@ function run() {
     const apply = el('button', { class: 'btn primary', type: 'button', text: '適用する', onclick: () => close(true) });
     const bar = el('div', { class: 'og-bar' }, [
       el('div', { class: 'og-title', text: 'ページを整理' }),
-      el('div', { class: 'og-tools' }, [btnRotL, btnRotR, btnUp, btnDown, btnDup, btnDel, el('span', { class: 'og-sep' }), btnBlank, btnFile, el('span', { class: 'og-sep' }), btnUndo, btnRedo]),
+      el('div', { class: 'og-tools' }, [btnRotL, btnRotR, btnUp, btnDown, btnDup, btnDel, btnReverse, el('span', { class: 'og-sep' }), btnBlank, btnFile, el('span', { class: 'og-sep' }), btnUndo, btnRedo]),
       el('div', { class: 'og-right' }, [menuSel, el('span', { class: 'og-zoomlabel', html: iconSvg('thumbs', 16) }), zoom, count, cancel, apply]),
     ]);
     const hint = el('div', { class: 'og-hint', text: 'クリックで選び（Ctrl / Shift で複数）、ドラッグで並べ替えます。ここでの操作は「適用する」を押すまで、文書には反映されません。' });
@@ -309,6 +310,17 @@ function run() {
         const next = items.slice();
         const order = delta < 0 ? idx : idx.slice().reverse();
         for (const k of order) { const j = k + delta; [next[k], next[j]] = [next[j], next[k]]; }
+        items = next;
+      });
+    }
+    // flip the order of the chosen pages among the places they occupy (all pages when nothing is chosen)
+    function reverse() {
+      const idx = items.map((i, k) => (selected.has(i.id) || !selected.size ? k : -1)).filter((k) => k >= 0);
+      if (idx.length < 2) return;
+      commit(() => {
+        const next = items.slice();
+        const picked = idx.map((k) => items[k]).reverse();
+        idx.forEach((k, n) => { next[k] = picked[n]; });
         items = next;
       });
     }

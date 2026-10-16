@@ -86,12 +86,14 @@ export function infoDialog(options) {
 
 /**
  * A dialog built from a field list. Resolves to the collected values, or null.
- * Fields: {key, label, type: text|textarea|number|colour|select|checkbox|password, options, value, hint}
+ * Fields: {key, label, type: text|textarea|number|colour|select|checkbox|password, options, value, hint,
+ *          showWhen?: (values) => boolean — a field that only matters for some choices is hidden until they apply}
  */
 export function formDialog({ fields, validate, ...options }) {
   return new Promise((resolve) => {
     const form = node('div', { class: 'dialog-form' });
     const inputs = new Map();
+    const rows = [];
 
     for (const field of fields) {
       let input;
@@ -117,16 +119,30 @@ export function formDialog({ fields, validate, ...options }) {
         });
       }
       inputs.set(field.key, { input, field });
-      form.append(node('div', { class: 'prop-row' }, [
+      const row = node('div', { class: 'prop-row' }, [
         node('label', { text: field.label }),
         input,
-      ]));
-      if (field.hint) form.append(node('div', { class: 'field-hint', text: field.hint }));
+      ]);
+      form.append(row);
+      const hint = field.hint ? node('div', { class: 'field-hint', text: field.hint }) : null;
+      if (hint) form.append(hint);
+      rows.push({ field, row, hint });
     }
     const problem = node('div', { class: 'warn-inline', hidden: '' });
     form.append(problem);
 
     const { backdrop, cancel, confirm } = shell({ ...options, body: form });
+    const syncVisibility = () => {
+      const values = collect();
+      for (const { field, row, hint } of rows) {
+        if (!field.showWhen) continue;
+        const show = !!field.showWhen(values);
+        row.hidden = !show;
+        if (hint) hint.hidden = !show;
+      }
+    };
+    form.addEventListener('input', syncVisibility);
+    form.addEventListener('change', syncVisibility);
     const collect = () => {
       const values = {};
       for (const [key, { input, field }] of inputs) {
@@ -159,6 +175,7 @@ export function formDialog({ fields, validate, ...options }) {
       }
     });
     mount(backdrop, () => finish(false));
+    syncVisibility();
     const first = [...inputs.values()][0];
     if (first) { first.input.focus(); first.input.select?.(); }
   });

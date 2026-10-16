@@ -483,6 +483,9 @@ window.addEventListener('drop', async (e) => {
   }
   if (pdfs.length) {
     if (hasDoc() && (pdfs.length > 1 || e.shiftKey)) { ops.mergeFiles(pdfs); return; }
+    // Several PDFs with nothing open: they are probably meant to be put together, so offer that instead of dropping all but the first
+    if (pdfs.length > 1) { convert.mergePdfs(pdfs); return; }
+    if (offices.length) toast('PDFと一緒にドロップされた Word・PowerPoint・Excel は開いていません。別々にドロップしてください', 'warn');
     const handle = handlePromise ? await handlePromise : null;
     openFile(pdfs[0], '', handle && handle.kind === 'file' ? handle : null);
   } else if (images.length) {

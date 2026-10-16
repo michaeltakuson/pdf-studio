@@ -276,7 +276,7 @@ export async function mergePdfs(initial = []) {
       const after = afterChoice();
       const rows = [...optionRow('ファイル名のしおりを付ける', marks, '結合したあと、各ファイルの先頭ページに名前のしおり（目次）が付きます')];
       if (hasDoc()) {
-        current = checkControl(false);
+        current = checkControl(true);
         rows.unshift(...optionRow(`いま開いている「${model.store.name}」も先頭に入れる`, current));
       }
       rows.push(...optionRow('結合したら', after));
@@ -414,7 +414,6 @@ async function runOfficeToPdf(files, { merge = true, after = 'open' } = {}) {
       await hooks.openFile(new File([blob], name, { type: 'application/pdf' }));
       state.unsaved = true;
       hooks.refreshAll();
-    hooks.refreshAll();
     } else {
       downloadBlob(blob, name);
       toast(`${name} をダウンロードしました`);
@@ -516,7 +515,7 @@ export async function pdfToOffice(fmt) {
     key: 'scope', label: '変換するページ', type: 'select',
     options: { all: `すべてのページ（${count}）`, current: describePages(targetPages()), ranges: '範囲を指定' },
   });
-  fields.push({ key: 'ranges', label: '範囲', placeholder: '例: 1-3, 5, 8-', hint: '「範囲を指定」を選んだときに使います' });
+  fields.push({ key: 'ranges', label: '範囲', placeholder: '例: 1-3, 5, 8-', showWhen: (v) => v.scope === 'ranges' });
   if (fmt === 'docx') {
     fields.push({
       key: 'mode', label: '変換のしかた', type: 'select', options: {
