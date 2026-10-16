@@ -187,6 +187,7 @@ function chooseFilesDialog({ title, intro, warning, accept, accepts, initial = [
         summary.classList.toggle('warn', total > SOFT_LIMIT);
         if (total > SOFT_LIMIT) summary.textContent += '（大きいので時間がかかります）';
         sortName.disabled = reverse.disabled = items.length < 2;
+        optionBox.dispatchEvent(new CustomEvent('count', { detail: items.length }));
       };
       addFiles(initial);
       render();
@@ -379,7 +380,10 @@ export async function officeToPdf(kind = 'any', initial = []) {
       const merge = selectControl({ one: '1つのPDFにまとめる', each: 'ファイルごとに別々のPDFにする（ZIPで保存）' }, 'one');
       const after = afterChoice();
       const mergeRow = optionRow('複数のファイルは', merge);
-      box.append(...mergeRow, ...optionRow('変換したら', after, 'ファイルごとに別々にした場合は、ZIPをダウンロードします'));
+      const hint = optionRow('変換したら', after, 'ファイルごとに別々にした場合は、ZIPをダウンロードします');
+      box.append(...mergeRow, ...hint);
+      // only meaningful with two or more files
+      box.addEventListener('count', (e) => { mergeRow[0].hidden = e.detail < 2; hint[1].hidden = e.detail < 2; });
       return () => ({ merge: merge.value === 'one', after: after.value });
     },
   });
