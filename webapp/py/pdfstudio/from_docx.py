@@ -888,6 +888,65 @@ class DocxToPdf:
                 conv.flow.emit_static_blocks(sheet, blocks, x + dx + l, y + dy + t + max(voff, 0.0))
         return draw
 
+    # ---- text frames (<w:framePr>): a paragraph that sits at a fixed place on the page
+    @staticmethod
+    def is_frame(el) -> bool:
+        if local(el.tag) != "p":
+            return False
+        fr = el.find(f"{wq('pPr')}/{wq('framePr')}")
+        if fr is None or wattr(fr, "dropCap"):
+            return False
+        return (wattr(fr, "x") is not None or wattr(fr, "xAlign")) and (wattr(fr, "y") is not None or wattr(fr, "yAlign"))
+
+    def frame_anchor(self, p) -> dict:
+        """A framed paragraph as a floating box, positioned the way a drawing is."""
+        import copy
+
+        fr = p.find(f"{wq('pPr')}/{wq('framePr')}")
+        col_w = self.flow.cols[self.flow.col][1] if getattr(self, "flow", None) else 400.0
+        w = twips(wattr(fr, "w")) if wattr(fr, "w") else col_w
+        h_attr = twips(wattr(fr, "h")) if wattr(fr, "h") else 0.0
+        inner = copy.deepcopy(p)
+        ppr = inner.find(wq("pPr"))
+        if ppr is not None:
+            for node in ppr.findall(wq("framePr")):
+                ppr.remove(node)
+        holder = ET.Element(wq("txbxContent"))
+        holder.append(inner)
+        saved = self.fields
+        self.fields = []
+        try:
+            blocks = self.layout_blocks(holder, max(w, 12.0), {})
+        finally:
+            self.fields = saved
+        content_h = _blocks_height(blocks)
+        rule = wattr(fr, "hRule")
+        h = h_attr if rule == "exact" and h_attr else max(h_attr, content_h)
+        conv = self
+
+        def draw(sheet, x, y):
+            conv.flow.emit_static_blocks(sheet, blocks, x, y)
+
+        h_rel = {"page": "page", "margin": "margin", "text": "column"}.get(wattr(fr, "hAnchor") or "text", "column")
+        v_rel = {"page": "page", "margin": "margin", "text": "paragraph"}.get(wattr(fr, "vAnchor") or "text", "paragraph")
+        info = {"w": w, "h": h, "data": None, "ops": [draw], "inline": False, "behind": False, "wrap": "wrapNone",
+                "dist": (0, 0, 0, 0), "h_rel": h_rel, "v_rel": v_rel,
+                "h_off": twips(wattr(fr, "x", "0")) if wattr(fr, "x") is not None else 0.0,
+                "v_off": twips(wattr(fr, "y", "0")) if wattr(fr, "y") is not None else 0.0}
+        xa, ya = wattr(fr, "xAlign"), wattr(fr, "yAlign")
+        if xa in ("left", "center", "right", "inside", "outside"):
+            info["h_align"] = xa
+        if ya in ("top", "center", "bottom", "inside", "outside", "inline"):
+            info["v_align"] = ya if ya != "inline" else "top"
+        wrap = wattr(fr, "wrap") or "auto"
+        if wrap in ("around", "tight", "through", "auto"):
+            info["wrap"] = "wrapSquare"
+            info["dist"] = (twips(wattr(fr, "hSpace", "0")), twips(wattr(fr, "vSpace", "0")),
+                            twips(wattr(fr, "hSpace", "0")), twips(wattr(fr, "vSpace", "0")))
+        elif wrap == "notBeside":
+            info["wrap"] = "wrapTopAndBottom"
+        return info
+
     # ---- VML (older Word drawings)
     def collect_vml(self, c, rpr, src: ParaSrc, style):
         v = NS["v"]
@@ -1743,6 +1802,20 @@ class Flow:
     # ---- placing
     def place_blocks(self, blocks_xml):
         c = self.c
+        # Framed paragraphs are not part of the flow: each belongs to the next ordinary block, like a floating drawing
+        frames_for: dict[int, list] = {}
+        filtered = []
+        pending = []
+        for el in blocks_xml:
+            if c.is_frame(el):
+                pending.append(el)
+                continue
+            if pending:
+                frames_for[len(filtered)] = pending
+                pending = []
+            filtered.append(el)
+        trailing = pending
+        blocks_xml = filtered
         # lay out lazily so a paragraph is measured at the width of the column it lands in
         ctx = {}
         boxes_cache: dict[int, object] = {}
@@ -1754,7 +1827,10 @@ class Flow:
                 el = blocks_xml[i]
                 width = self.cols[self.col][1]
                 if local(el.tag) == "p":
-                    boxes_cache[i] = c.layout_para(c.make_para(el, ctx), width, flow=self)
+                    src = c.make_para(el, ctx)
+                    for fr in frames_for.get(i, ()):
+                        src.anchors.append(c.frame_anchor(fr))
+                    boxes_cache[i] = c.layout_para(src, width, flow=self)
                 else:
                     boxes_cache[i] = c.make_table(el, width, ctx)
             return boxes_cache[i]
@@ -1766,9 +1842,19 @@ class Flow:
                 nxt = box_at(i + 1) if box.keep_next else None
                 self.place_para(box, prev, nxt)
             else:
+                for fr in frames_for.get(i, ()):
+                    a = c.frame_anchor(fr)
+                    x, y = self.anchor_rect(a, self.y)
+                    if self.sheet is not None:
+                        self.draw_anchor(self.sheet, a, x, y)
                 self.place_table(box)
             prev = box
             boxes_cache.pop(i - 2, None)
+        for fr in trailing:
+            if self.sheet is not None:
+                a = c.frame_anchor(fr)
+                x, y = self.anchor_rect(a, self.y)
+                self.draw_anchor(self.sheet, a, x, y)
 
     def remaining(self):
         return self.body_bottom - self.page_reserve - self.y

@@ -520,7 +520,8 @@ class DocxFromPdf:
         lines = block.lines
         vertical = any(ln.vertical for ln in lines)
         x0, y0, x1, y1 = block.bbox
-        width = (x1 - x0) * 1.08 + 4
+        # a one-line frame must not wrap when the reader's font is a little wider than the original
+        width = (x1 - x0) * (1.15 if len(lines) == 1 else 1.08) + (8 if len(lines) == 1 else 4)
         pitch = None
         if len(lines) >= 2:
             pitch = (lines[-1].bbox[1] - lines[0].bbox[1]) / (len(lines) - 1)

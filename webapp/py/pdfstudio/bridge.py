@@ -868,7 +868,7 @@ def stats(payload: dict) -> dict:
         if not body:
             blank += 1
     return {"pages": entry.doc.page_count, "characters": characters, "words": words, "pagesWithoutText": blank,
-            "bytes": len(entry.doc.tobytes())}
+            "bytes": len(entry.bytes())}
 
 
 def page_text(payload: dict) -> dict:
