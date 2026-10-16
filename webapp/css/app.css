@@ -841,3 +841,7 @@ body.present .annot-layer .hit, body.present .text-layer, body.present .form-lay
 .og-quick button:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
 .og-empty { grid-column: 1 / -1; text-align: center; color: var(--text-dim); padding: 60px 20px; }
 @media (max-width: 720px) { .og-btn span { display: none; } .og-btn { min-width: 36px; } .og-count { min-width: 0; } }
+.empty-card { max-width: 700px; width: calc(100% - 32px); }
+.tool-grid { grid-template-columns: repeat(4, 1fr); }
+.tool-card { padding: 8px 4px 7px; }
+@media (max-width: 560px) { .tool-grid { grid-template-columns: repeat(2, 1fr); } }

@@ -240,6 +240,7 @@ async function deliverDocument(data, after, message) {
     state.unsaved = false;       // already agreed to leave the old one
     await hooks.adopt(data, { message });
     state.unsaved = true;
+    hooks.refreshAll();
     return;
   }
   try {
@@ -408,6 +409,8 @@ async function runOfficeToPdf(files, { merge = true, after = 'open' } = {}) {
       state.unsaved = false;
       await hooks.openFile(new File([blob], name, { type: 'application/pdf' }));
       state.unsaved = true;
+      hooks.refreshAll();
+    hooks.refreshAll();
     } else {
       downloadBlob(blob, name);
       toast(`${name} をダウンロードしました`);
@@ -450,6 +453,7 @@ export async function openOfficeFile(file) {
     state.unsaved = false;
     await hooks.openFile(new File([blob], name, { type: 'application/pdf' }));
     state.unsaved = true;
+    hooks.refreshAll();
     toast(`${KINDS[kind]?.label || ''} ファイルをPDFに変換して開きました。保存すると PDF になります`);
     await reportProblems(meta, 1);
   } catch (err) {
