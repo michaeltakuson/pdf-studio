@@ -110,9 +110,14 @@ export async function errorDetail(response) {
  * (the engine snapshots first, which is what makes it undoable), reload the
  * pages where the reader was, and mark the document as changed.
  */
+/** "回転" → 「回転を実行しています…」, "分割" → 「分割しています…」: a label is a noun, so it does not always take しています directly. */
+export function progressText(label) {
+  return /(に変換|作成|変換|分割|軽量化|置換|保護|結合|整理|認識)$/.test(label) ? `${label}しています…` : `${label}を実行しています…`;
+}
+
 export async function structural(path, payload = {}, { label = '処理' } = {}) {
   if (!model.store.docId) return null;
-  const done = busy(`${label}しています…`);
+  const done = busy(progressText(label));
   try {
     await paint();
     const response = await post(path, payload, { withAnnots: true });
@@ -177,7 +182,7 @@ export async function downloadResponse(response, fallback) {
 /** POST, then hand whatever comes back to the browser as a download. */
 export async function exportVia(path, body, { label = '書き出し', fallback = 'export', withAnnots = true } = {}) {
   if (!model.store.docId) return false;
-  const done = busy(`${label}しています…`);
+  const done = busy(progressText(label));
   try {
     await paint();
     const response = await post(path, body, { withAnnots });

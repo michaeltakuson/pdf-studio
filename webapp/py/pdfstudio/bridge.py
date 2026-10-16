@@ -835,7 +835,12 @@ def ocr_apply(payload: dict) -> dict:
             # Stretch each word to the width it has in the picture, so a
             # selection drawn over the scan lines up with the letters.
             try:
-                writer.append(pymupdf.Point(x0, y1 - (y1 - y0) * 0.2), text, font=font, fontsize=size * min(1.6, max(0.5, (x1 - x0) / natural)))
+                if len(text) == 1 and ord(text) >= 0x2E80:
+                    # one Japanese character: a full-width glyph centred on the box it was found in. Scaling it to
+                    # the width of the box (a narrow "ー" or "、") would give every hit a different height.
+                    writer.append(pymupdf.Point(x0 + ((x1 - x0) - natural) / 2, y1 - (y1 - y0) * 0.2), text, font=font, fontsize=size)
+                else:
+                    writer.append(pymupdf.Point(x0, y1 - (y1 - y0) * 0.2), text, font=font, fontsize=size * min(1.6, max(0.5, (x1 - x0) / natural)))
                 total += len(text)
             except Exception:
                 continue

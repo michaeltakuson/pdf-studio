@@ -395,6 +395,12 @@ export class Viewer extends EventTarget {
       this.container.style.width = '';
     }
     if (anchor) this.restore(anchor);
+    // A document that mixes sizes (a landscape page among portrait ones) is wider than the screen at the zoom that fits
+    // the page being read. The pages sit centred in that wider area, so look at the middle of it — starting at the left
+    // edge shows page one cut off on its right side.
+    if (this.zoomMode.startsWith('fit') && this.stage.scrollWidth > this.stage.clientWidth + 1) {
+      this.stage.scrollLeft = (this.stage.scrollWidth - this.stage.clientWidth) / 2;
+    }
     clearTimeout(this._zoomTimer);
     // Rendering is the slow part; wait for a wheel or pinch to settle.
     this._zoomTimer = setTimeout(() => {

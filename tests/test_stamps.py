@@ -63,4 +63,18 @@ assert pages.auto_crop(doc4, None, 10) == 1
 assert doc4[0].rect.width < 150
 pages.reset_crop(doc4, [0])
 assert doc4[0].rect.width > 600
+# headings that are only bold, in the size of the body text
+doc5 = pymupdf.open()
+page5 = doc5.new_page()
+for text, bold, y in [("Chapter One", True, 80), ("Body line that is long enough to count as text for the page.", False, 110),
+                      ("More body text goes here and is also long enough to count.", False, 124),
+                      ("Q1", True, 160), ("A question that is bold and ends here without a stop", True, 160),
+                      ("Chapter Two", True, 220), ("Closing text that is body text and ends with a stop.", False, 250),
+                      ("Chapter Three", True, 300), ("Last text that is body text and ends with a stop.", False, 330)]:
+    page5.insert_text((60 if text != "A question that is bold and ends here without a stop" else 90, y), text, fontsize=10,
+                      fontname="hebo" if bold else "helv")
+toc = pages.auto_outline(doc5)
+titles = [row[1] for row in toc]
+assert titles == ["Chapter One", "Chapter Two", "Chapter Three"], titles
+
 print("stamp tests passed")

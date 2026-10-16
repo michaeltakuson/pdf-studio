@@ -7,6 +7,8 @@ destroy content take a snapshot first — see session.Doc.snapshot.
 
 from __future__ import annotations
 
+import re
+
 import pymupdf
 
 from .common import TEXT_ONLY, hex_to_rgb, rect_to_page
@@ -393,7 +395,7 @@ def auto_outline(doc: pymupdf.Document, limit: int = 500) -> list[list]:
                 size = round(max(float(s.get("size", 0)) for s in spans), 1)
                 weight[size] += len(text)
                 lines.append({
-                    "page": page.number, "y": line["bbox"][1], "text": text, "size": size,
+                    "page": page.number, "y": line["bbox"][1], "y1": line["bbox"][3], "text": text, "size": size,
                     "bold": any(int(s.get("flags", 0)) & 16 for s in spans),
                 })
     if not lines:
@@ -406,9 +408,39 @@ def auto_outline(doc: pymupdf.Document, limit: int = 500) -> list[list]:
             return False
         return text[-1] not in "。、,;"
 
+    def standalone_bold(index_in_page: list[dict], k: int) -> bool:
+        """A short bold line that stands alone — not on a baseline with other text, with a line of air above it.
+
+        Many documents set their headings in the size of the body text and only make them bold. Bold that runs on
+        from the line above (a question that wraps), a label like "Q3" and a bold line sharing its baseline with
+        the text after it are not headings.
+        """
+        line = index_in_page[k]
+        text = line["text"]
+        if not line["bold"] or abs(line["size"] - body) > body * 0.04 or len(text) > 30 or len(text) < 2:
+            return False
+        if re.fullmatch(r"[A-Za-zＡ-Ｚａ-ｚ]{0,2}[\s.．:：]*\d{1,4}[\s.．)）]*", text):
+            return False                                   # "Q3", "A12", "3."
+        if any(j != k and abs(other["y"] - line["y"]) < line["size"] * 0.5 for j, other in enumerate(index_in_page)):
+            return False                                   # something else on the same baseline
+        above = [o for o in index_in_page if o["y1"] <= line["y"] + 1]
+        gap = line["y"] - max((o["y1"] for o in above), default=0.0)
+        return gap >= line["size"] * 0.9
+
+    by_page: dict[int, list[dict]] = {}
+    for l in lines:
+        by_page.setdefault(l["page"], []).append(l)
+    flagged: set[int] = set()
+    for page_lines in by_page.values():
+        page_lines.sort(key=lambda l: (l["y"], 0))
+        for k, l in enumerate(page_lines):
+            if plausible(l) and standalone_bold(page_lines, k):
+                flagged.add(id(l))
+
     heads = [
         l for l in lines if plausible(l)
-        and (l["size"] >= body * 1.18 or (l["bold"] and l["size"] >= body * 1.04 and len(l["text"]) <= 40))
+        and (l["size"] >= body * 1.18 or (l["bold"] and l["size"] >= body * 1.04 and len(l["text"]) <= 40)
+             or id(l) in flagged)
     ]
     # A line that recurs on page after page is a running header, not a heading.
     seen: Counter = Counter()

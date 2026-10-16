@@ -443,7 +443,17 @@ class XlsxFromPdf:
             sheet.row_h[row0 + i] = max(15.0, (lines[i].bbox[3] - lines[i].bbox[1]) * 1.15)
         for k in range(len(anchors)):
             width = (anchors[k + 1] - anchors[k]) / 5.25 if k + 1 < len(anchors) else 20.0
-            sheet.col_w[k] = max(sheet.col_w.get(k, 0.0), min(max(width, 4.0), 60.0))
+            if k + 1 == len(anchors):
+                # the last column holds the running text: make it as wide as its longest cell, or the text is cut off
+                # at the edge of the sheet when it is printed or shown in a viewer that does not let it spill over
+                for r in rows:
+                    for x, text, sp in r:
+                        if max((j for j, a in enumerate(anchors) if a <= x + 10), default=0) != k:
+                            continue
+                        size = (sp.size if sp is not None else 10.0) / 10.0
+                        est = sum(2.0 if ord(ch) >= 0x2E80 else 1.0 for ch in text) * size * 1.05
+                        width = max(width, min(est, 110.0))
+            sheet.col_w[k] = max(sheet.col_w.get(k, 0.0), min(max(width, 4.0), 110.0 if k + 1 == len(anchors) else 60.0))
         return row0 + len(rows) - 1
 
     # ------------------------------------------------------------------ packaging
