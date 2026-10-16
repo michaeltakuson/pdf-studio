@@ -12,6 +12,8 @@
 | `arrange-touch-spread.js` | 整列・指でのドラッグ・見開き |
 | `files-and-saving.js` | ドロップ・画像の貼り付け・ファイルへの保存・自動保存・印刷・書き出し |
 | `ribbon-fold-and-search-list.js` | リボンの折りたたみ（Ctrl+F1・ダブルクリック・一時表示）・検索結果の一覧 |
+| `convert-and-organize.js` | Word→PDF・結合・ページ整理のダイアログ |
+| `undo-stamps-close.js` | ページ操作の元に戻す／やり直し・透かしを入れて取り除く・ファイルを閉じる |
 | `edit-while-loading.js` | エンジンの準備中に書き込み、準備完了後に引き継がれること |
 
 ## 使い方
