@@ -103,8 +103,12 @@ def open_document(payload: dict) -> dict:
         entry = session.create(name, data, password)
     except session.PasswordRequired as exc:
         raise ApiError(401, str(exc))
-    except Exception as exc:
-        raise ApiError(400, f"PDFを開けませんでした: {exc}")
+    except Exception:  # noqa: BLE001 - the library's own wording is English and of no use to the reader
+        raise ApiError(400, "PDFとして読み込めませんでした。壊れているか、PDFではないファイルかもしれません")
+    if entry.doc.page_count == 0:
+        # a truncated download is "repaired" into a document with no pages, which nothing can show or save
+        session.close(entry.id)
+        raise ApiError(400, "このPDFは壊れていて、ページを読み取れませんでした。ダウンロードし直すと開けることがあります")
     result = _describe(entry)
     result["wasProtected"] = entry.was_protected
     return result
@@ -137,7 +141,15 @@ def search(payload: dict) -> dict:
     case_sensitive = bool(payload.get("caseSensitive"))
     hits = []
     relaxed_used = False
+    target = "".join(needle.split()).lower()
+    target_plain = target.replace("-", "")
+    page_chars: dict[int, list] = {}
     for page in entry.doc:
+        # One look at the page's text rules out most pages at once (searching is the slow part on a long document).
+        # Spaces, line breaks and a hyphen at a line end do not count, because the real search ignores them too.
+        flat = "".join(page.get_text().split()).lower()
+        if target not in flat and target_plain not in flat.replace("-", ""):
+            continue
         quads = page.search_for(needle, quads=True, flags=pymupdf.TEXTFLAGS_SEARCH)
         if not quads:
             quads = content.search_relaxed(page, needle)
@@ -168,9 +180,12 @@ def search(payload: dict) -> dict:
                     # it is what separates the hit from its neighbours.
                     flat = " ".join(text.split())
                     return (" " if text[:1].isspace() and flat else "") + flat + (" " if text[-1:] == " " and flat else "")
-                before = squeeze(page.get_textbox(pymupdf.Rect(limit.x0, top, box.x0, bottom)))[-24:]
-                word = " ".join(page.get_textbox(pymupdf.Rect(box.x0, top, box.x1, bottom)).split()) or needle
-                after = squeeze(page.get_textbox(pymupdf.Rect(box.x1, top, limit.x1, bottom)))[:70].rstrip()
+                chars = page_chars.get(page.number)
+                if chars is None:
+                    chars = page_chars[page.number] = content.chars_of(page)
+                before = squeeze(content.text_in(chars, pymupdf.Rect(limit.x0, top, box.x0, bottom)))[-24:]
+                word = " ".join(content.text_in(chars, pymupdf.Rect(box.x0, top, box.x1, bottom)).split()) or needle
+                after = squeeze(content.text_in(chars, pymupdf.Rect(box.x1, top, limit.x1, bottom)))[:70].rstrip()
                 hit["context"] = before + word + after
                 hit["contextAt"] = [len(before), len(word)]
             hits.append(hit)

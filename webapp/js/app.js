@@ -57,7 +57,15 @@ async function adopt(data, { handle = null, message = null, draftKey = null, kee
   setSearchCount('');
   model.loadDocument(data);
   $('#emptyState').classList.add('hidden');
-  await viewer.load(`${docUrl('/file')}?t=${Date.now()}`, { keepPosition });
+  try {
+    await viewer.load(`${docUrl('/file')}?t=${Date.now()}`, { keepPosition });
+  } catch (err) {
+    // The engine accepted the file but the page could not be shown: do not leave a document that is "open" and blank
+    const id = data.id;
+    await showStartScreen();
+    fetch(`/api/doc/${id}/close`, { method: 'POST' }).catch(() => {});
+    throw new Error(`ページを表示できませんでした（${err.message}）。ファイルが壊れているかもしれません`);
+  }
   state.unsaved = false;
   afterReload();
   refreshAll();
@@ -305,6 +313,13 @@ async function closeDocument() {
   const id = model.store.docId;
   // Closing on purpose means the unsaved markup was let go, so do not offer it back next time.
   if (state.draftKey) clearDraft(state.draftKey);
+  await showStartScreen();
+  if (id && id !== 'preview') fetch(`/api/doc/${id}/close`, { method: 'POST' }).catch(() => {});
+}
+
+/** Back to the screen with nothing open (after File > Close, or when a file could not be shown). */
+async function showStartScreen() {
+  clearTimeout(draftTimer);
   await viewer.clear();
   model.loadDocument({ id: null, name: '', pages: [], annots: [] });
   state.preview = null;
@@ -324,7 +339,6 @@ async function closeDocument() {
   renderOutlinePanel();
   refreshAll();
   status('準備完了 — PDFを開いてください');
-  if (id && id !== 'preview') fetch(`/api/doc/${id}/close`, { method: 'POST' }).catch(() => {});
 }
 
 async function newBlank() {
@@ -2330,8 +2344,9 @@ async function runSearch() {
     drawSearchHits();
     return;
   }
+  setSearchCount('検索中…');
   const response = await post('/search', { query });
-  if (!response.ok) { toast('検索に失敗しました', 'error'); return; }
+  if (!response.ok) { setSearchCount(''); toast('検索に失敗しました', 'error'); return; }
   const data = await response.json();
   if ($('#searchInput').value.trim() !== query) return; // the query moved on while this ran
   state.searchHits = data.hits || [];

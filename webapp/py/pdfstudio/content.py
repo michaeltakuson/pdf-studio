@@ -19,6 +19,25 @@ from .common import RAW_TEXT_ONLY, TEXT_ONLY, hex_to_rgb
 # ---------------------------------------------------------------- searching
 
 
+def chars_of(page: pymupdf.Page) -> list[tuple[float, float, str]]:
+    """Every character of the page with the centre of its box, in reading order — one extraction, many look-ups."""
+    out: list[tuple[float, float, str]] = []
+    for block in page.get_text("rawdict", flags=RAW_TEXT_ONLY).get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                for char in span.get("chars", []):
+                    x0, y0, x1, y1 = char["bbox"]
+                    out.append(((x0 + x1) / 2, (y0 + y1) / 2, char.get("c", "")))
+    return out
+
+
+def text_in(chars: list[tuple[float, float, str]], rect: pymupdf.Rect) -> str:
+    """The characters whose centre lies inside `rect`."""
+    return "".join(c for cx, cy, c in chars if rect.x0 <= cx < rect.x1 and rect.y0 <= cy < rect.y1)
+
+
 def search_relaxed(page: pymupdf.Page, needle: str) -> list[pymupdf.Quad]:
     """Find a phrase while ignoring whitespace and line breaks.
 
