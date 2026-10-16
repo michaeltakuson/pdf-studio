@@ -19,6 +19,8 @@ let redoStack = [];
 // cannot be replayed from here; the engine keeps a snapshot for each one and
 // this counts how many can still be stepped back over.
 let structuralDepth = 0;
+// How many of those the engine can step forward over again after an undo.
+let structuralRedoDepth = 0;
 
 export function subscribe(fn) {
   listeners.add(fn);
@@ -33,7 +35,7 @@ export function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
 
-export function loadDocument({ id, name, pages, annots, undoDepth = 0 }, { keepName = false } = {}) {
+export function loadDocument({ id, name, pages, annots, undoDepth = 0, redoDepth = 0 }, { keepName = false } = {}) {
   store.docId = id;
   if (!keepName || !store.name) store.name = name;
   store.pages = pages;
@@ -43,6 +45,7 @@ export function loadDocument({ id, name, pages, annots, undoDepth = 0 }, { keepN
   undoStack = [];
   redoStack = [];
   structuralDepth = undoDepth;
+  structuralRedoDepth = redoDepth;
   emit('document');
 }
 
@@ -89,6 +92,7 @@ function run(command, reason) {
   command.redo();
   undoStack.push(command);
   redoStack = [];
+  structuralRedoDepth = 0;  // a new edit ends the redo line
   store.dirty = true;
   emit(reason || 'change');
 }
@@ -109,18 +113,20 @@ export function undo() {
 
 export function redo() {
   const command = redoStack.pop();
-  if (!command) return;
+  if (!command) return structuralRedoDepth > 0 ? 'structural' : null;
   command.redo();
   undoStack.push(command);
   store.dirty = true;
   emit('change');
+  return 'done';
 }
 
 export const history = {
   get canUndo() { return undoStack.length > 0 || structuralDepth > 0; },
   get nextIsStructural() { return undoStack.length === 0 && structuralDepth > 0; },
   get structuralDepth() { return structuralDepth; },
-  get canRedo() { return redoStack.length > 0; },
+  get canRedo() { return redoStack.length > 0 || structuralRedoDepth > 0; },
+  get nextRedoIsStructural() { return redoStack.length === 0 && structuralRedoDepth > 0; },
 };
 
 export function addAnnots(items, { select = true } = {}) {
@@ -262,6 +268,7 @@ export function updateAnnots(ids, patch, { merge = null } = {}) {
     undo() { restore([...this.before.values()]); },
   });
   redoStack = [];
+  structuralRedoDepth = 0;
   store.dirty = true;
   emit('update');
 }

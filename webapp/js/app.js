@@ -578,6 +578,8 @@ function refreshPanels() {
   $('#qPrint').disabled = !hasDoc();
   $('#btnUndo').title = model.history.nextIsStructural
     ? '直前のページ操作を元に戻す (Ctrl+Z)' : '元に戻す (Ctrl+Z)';
+  $('#btnRedo').title = model.history.nextRedoIsStructural
+    ? '元に戻したページ操作をやり直す (Ctrl+Y)' : 'やり直し (Ctrl+Y)';
 
   const name = hasDoc() ? (state.fileHandle?.name || model.store.name) : '文書が開かれていません';
   $('#docName').textContent = name;
@@ -1277,9 +1279,23 @@ async function undo() {
   }
 }
 
-function redo() {
+async function redo() {
   flushEditing();
-  model.redo();
+  const outcome = model.redo();
+  if (outcome !== 'structural') return;
+  const done = busy('やり直しています…');
+  try {
+    await paint();
+    const response = await post('/redo', {});
+    if (!response.ok) { toast(`やり直せませんでした: ${await errorDetail(response)}`, 'error'); return; }
+    await reloadFrom(await response.json());
+    state.unsaved = true;
+    state.pageSelection.clear();
+    refreshAll();
+    toast('元に戻した操作をやり直しました');
+  } finally {
+    done();
+  }
 }
 
 $('#btnUndo').addEventListener('click', undo);

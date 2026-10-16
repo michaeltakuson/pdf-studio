@@ -35,11 +35,15 @@ class Doc:
         # label -> pdf bytes, most recent first. Kept short: this is an
         # in-tab undo net for destructive operations, not archival storage.
         self.snapshots: list[tuple[str, bytes]] = []
+        # The states stepped back over, most recent first, so "redo" can return to them.
+        self.redos: list[tuple[str, bytes]] = []
         # id -> canonical form of each annotation as last read or written, so
         # a save only rewrites the ones that actually changed.
         self.baseline: dict[str, str] = {}
 
-    def snapshot(self, label: str) -> str:
+    def snapshot(self, label: str, *, keep_redo: bool = False) -> str:
+        if not keep_redo:
+            self.redos.clear()  # a new operation ends the redo line
         self.snapshots.insert(0, (label, self.doc.tobytes()))
         # Bounded by size as well as count: twenty copies of a 50 MB scan
         # would take the tab down.
@@ -56,6 +60,18 @@ class Doc:
         if not self.snapshots:
             return None
         label, data = self.snapshots.pop(0)
+        self.redos.insert(0, (label, self.doc.tobytes()))
+        del self.redos[15:]
+        self.doc.close()
+        self.doc = pymupdf.open("pdf", data)
+        return label
+
+    def redo(self) -> str | None:
+        """Go forward again after a restore. Returns the label, or None."""
+        if not self.redos:
+            return None
+        label, data = self.redos.pop(0)
+        self.snapshot(label, keep_redo=True)
         self.doc.close()
         self.doc = pymupdf.open("pdf", data)
         return label

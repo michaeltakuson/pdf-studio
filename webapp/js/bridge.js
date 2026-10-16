@@ -187,7 +187,7 @@ async function route(url, init) {
     return { action: 'annots.save', payload: await readPayload(init, base) };
   }
   const SIMPLE = {
-    undo: 'undo', compress: 'compress', nup: 'nup', split: 'split', images: 'images',
+    undo: 'undo', redo: 'redo', compress: 'compress', nup: 'nup', split: 'split', images: 'images',
     'extract-ranges': 'pages.extract-ranges', 'ocr-apply': 'ocr.apply',
     outline: 'outline.set', metadata: 'metadata.set', snapshot: 'snapshot', 'outline-auto': 'outline.auto', 'fit-paper': 'fit-paper',
     'extract-images': 'images.extract', 'to-office': 'pdf.to-office',

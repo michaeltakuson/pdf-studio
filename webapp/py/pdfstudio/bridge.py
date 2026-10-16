@@ -60,6 +60,7 @@ def _describe(entry: session.Doc) -> dict:
         "isEncrypted": doc.is_encrypted,
         "needsPass": doc.needs_pass,
         "undoDepth": len(entry.snapshots),
+        "redoDepth": len(entry.redos),
     }
 
 
@@ -617,6 +618,17 @@ def undo_structural(payload: dict) -> dict:
     return out
 
 
+def redo_structural(payload: dict) -> dict:
+    """Step forward again over an operation that was just undone."""
+    entry = _doc(payload)
+    label = entry.redo()
+    if label is None:
+        raise ApiError(400, "やり直せる操作がありません")
+    out = _describe(entry)
+    out["restored"] = label
+    return out
+
+
 def from_images(payload: dict) -> dict:
     files = [(f.get("filename") or "image", _bytes(f.get("data"))) for f in payload.get("files") or []]
     if not files:
@@ -1130,6 +1142,7 @@ _JSON_ROUTES = {
     "accessibility.order": accessibility_order,
     "close": close_document,
     "undo": undo_structural,
+    "redo": redo_structural,
     "from-images": from_images,
     "files.merge": merge_files,
     "pages.organize": organize,
