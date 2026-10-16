@@ -232,6 +232,9 @@ async function route(url, init) {
     if (query.get('at') != null) payload.at = Number(query.get('at'));
     return { action: 'merge', payload };
   }
+  if ((rest[0] === 'stamps-count' || rest[0] === 'stamps-remove') && method === 'POST') {
+    return { action: rest[0] === 'stamps-count' ? 'stamps.count' : 'stamps.remove', payload: await readPayload(init, base) };
+  }
   if (rest[0] === 'stamp-pages' && method === 'POST') {
     return { action: 'stamp-pages', payload: await readPayload(init, base) };
   }
@@ -287,7 +290,7 @@ async function route(url, init) {
       const form = init.body;
       const file = form.get('file');
       const text = file ? await file.text() : '';
-      return { action: 'fields.import', payload: { ...base, text } };
+      return { action: 'fields.import', payload: { ...base, text, undoable: true } };
     }
     if (rest[1] === 'collate' && method === 'POST') {
       return { action: 'fields.collate', payload: await readPayload(init, base) };

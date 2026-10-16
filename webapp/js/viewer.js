@@ -57,6 +57,18 @@ export class Viewer extends EventTarget {
     });
   }
 
+  /** Let go of the document and empty the page area (File > Close). */
+  async clear() {
+    if (this.loadingTask) {
+      await this.loadingTask.destroy();
+      this.loadingTask = null;
+      this.pdf = null;
+    }
+    this._observer.disconnect();
+    this.container.textContent = '';
+    this.pageViews = [];
+  }
+
   async load(url, { keepPosition = false } = {}) {
     const anchor = keepPosition && this.pageViews.length ? this.position() : null;
     // pdf.js picks its own network stream for a `url` source — sometimes

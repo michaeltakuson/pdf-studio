@@ -85,7 +85,55 @@ def crop(doc: pymupdf.Document, pages: list[int], rect: list[float]) -> None:
 def reset_crop(doc: pymupdf.Document, pages: list[int]) -> None:
     for index in pages:
         page = doc[index]
-        page.set_cropbox(page.mediabox)
+        # dropping the key is the exact reset; set_cropbox(mediabox) fails once the media box has a negative origin
+        doc.xref_set_key(page.xref, "CropBox", "null")
+
+
+def content_box(page: pymupdf.Page) -> pymupdf.Rect | None:
+    """Where the page actually has something on it (text, drawings, pictures, markup), or None if it is empty."""
+    box = pymupdf.Rect()
+    found = False
+
+    def take(rect) -> None:
+        nonlocal box, found
+        rect = pymupdf.Rect(rect)
+        if rect.is_empty or rect.is_infinite:
+            return
+        box = rect if not found else box | rect
+        found = True
+
+    for block in page.get_text("blocks"):
+        if block[6] == 0 and str(block[4]).strip():
+            take(block[:4])
+        elif block[6] == 1:
+            take(block[:4])
+    for drawing in page.get_drawings():
+        rect = pymupdf.Rect(drawing["rect"])
+        # a hairline or a page-sized white fill says nothing about where the content is
+        if rect.width > 0 or rect.height > 0:
+            take(rect)
+    for info in page.get_image_info():
+        take(info["bbox"])
+    for annot in page.annots() or []:
+        take(annot.rect)
+    return box if found else None
+
+
+def auto_crop(doc: pymupdf.Document, pages: list[int] | None, padding: float = 14.0) -> int:
+    """Trim every page to its content plus `padding` points: the reverse of adding margins."""
+    cropped = 0
+    for index in _target_pages(doc, pages):
+        page = doc[index]
+        box = content_box(page)
+        if box is None:
+            continue
+        box = pymupdf.Rect(box.x0 - padding, box.y0 - padding, box.x1 + padding, box.y1 + padding) & page.rect
+        if box.is_empty or (box.width >= page.rect.width - 1 and box.height >= page.rect.height - 1):
+            continue
+        # set_cropbox takes the unrotated frame, like crop() above
+        page.set_cropbox(pymupdf.Rect(rect_to_page(page, list(box))) & page.mediabox)
+        cropped += 1
+    return cropped
 
 
 def add_margins(doc: pymupdf.Document, pages: list[int] | None, *, left=0.0, top=0.0,
@@ -416,12 +464,64 @@ def _target_pages(doc: pymupdf.Document, pages: list[int] | None) -> list[int]:
     return sorted(set(pages)) if pages else list(range(doc.page_count))
 
 
+STAMP_MARK = b"%PSSTAMP:"
+
+
+def _tag_new_streams(page: pymupdf.Page, before: set[int], kind: str) -> None:
+    """Label the content added since `before`, so the stamp can be found and taken out again later."""
+    doc = page.parent
+    for xref in page.get_contents():
+        if xref in before:
+            continue
+        doc.update_stream(xref, STAMP_MARK + kind.encode() + b"\n" + doc.xref_stream(xref))
+
+
+def _stamp_kind(doc: pymupdf.Document, xref: int) -> str | None:
+    try:
+        if not doc.xref_is_stream(xref):
+            return None
+        head = doc.xref_stream(xref)[:64]
+    except Exception:  # noqa: BLE001
+        return None
+    if head.startswith(STAMP_MARK):
+        return head[len(STAMP_MARK):].split(b"\n", 1)[0].decode("ascii", "ignore")
+    return None
+
+
+def count_stamps(doc: pymupdf.Document) -> dict[str, int]:
+    """How many pages carry each kind of stamp this app has put on (watermark, headerFooter, bates)."""
+    found: dict[str, int] = {}
+    for page in doc:
+        for kind in {_stamp_kind(doc, x) for x in page.get_contents()} - {None}:
+            found[kind] = found.get(kind, 0) + 1
+    return found
+
+
+def remove_stamps(doc: pymupdf.Document, kinds: set[str] | None = None, pages=None) -> int:
+    """Take out the stamps added by watermark / header_footer / bates. Returns how many were removed."""
+    removed = 0
+    for index in _target_pages(doc, pages):
+        page = doc[index]
+        contents = page.get_contents()
+        keep = []
+        for xref in contents:
+            kind = _stamp_kind(doc, xref)
+            if kind and (kinds is None or kind in kinds):
+                removed += 1
+            else:
+                keep.append(xref)
+        if len(keep) != len(contents):
+            doc.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in keep) + "]")
+    return removed
+
+
 def watermark(doc: pymupdf.Document, text: str, *, pages=None, colour="#c0c0c0",
               size=48, opacity=0.25, angle=45) -> int:
     count = 0
     font = _font()
     for index in _target_pages(doc, pages):
         page = doc[index]
+        before = set(page.get_contents())
         rect = page.rect
         writer = pymupdf.TextWriter(rect, opacity=opacity)
         width = font.text_length(text, size)
@@ -435,6 +535,7 @@ def watermark(doc: pymupdf.Document, text: str, *, pages=None, colour="#c0c0c0",
             morph=(pymupdf.Point(rect.width / 2, rect.height / 2),
                    pymupdf.Matrix(angle)),
         )
+        _tag_new_streams(page, before, "watermark")
         count += 1
     _subset(doc)
     return count
@@ -447,6 +548,7 @@ def header_footer(doc: pymupdf.Document, *, header="", footer="", pages=None,
     targets = _target_pages(doc, pages)
     for index in targets:
         page = doc[index]
+        before = set(page.get_contents())
         rect = page.rect
         writer = pymupdf.TextWriter(rect)
         for text, y in ((header, margin), (footer, rect.height - margin + size)):
@@ -458,6 +560,7 @@ def header_footer(doc: pymupdf.Document, *, header="", footer="", pages=None,
                 pymupdf.Point((rect.width - width) / 2, y), filled, font=font, fontsize=size
             )
         writer.write_text(page, color=hex_to_rgb(colour))
+        _tag_new_streams(page, before, "headerFooter")
     _subset(doc)
     return len(targets)
 
@@ -467,6 +570,7 @@ def bates(doc: pymupdf.Document, *, prefix="", start=1, digits=6, suffix="",
     """Sequential numbering across the document — the legal-discovery standard."""
     font = _font()
     for offset, page in enumerate(doc):
+        before = set(page.get_contents())
         label = f"{prefix}{str(start + offset).zfill(digits)}{suffix}"
         rect = page.rect
         writer = pymupdf.TextWriter(rect)
@@ -476,6 +580,7 @@ def bates(doc: pymupdf.Document, *, prefix="", start=1, digits=6, suffix="",
             label, font=font, fontsize=size,
         )
         writer.write_text(page, color=hex_to_rgb(colour))
+        _tag_new_streams(page, before, "bates")
     _subset(doc)
     return doc.page_count
 

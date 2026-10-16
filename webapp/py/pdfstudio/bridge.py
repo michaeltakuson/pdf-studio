@@ -230,6 +230,9 @@ def page_action(payload: dict) -> dict:
             )
         elif action == "crop":
             pages.crop(entry.doc, targets, payload["rect"])
+        elif action == "autocrop":
+            if not pages.auto_crop(entry.doc, targets or None, float(payload.get("padding", 14))):
+                raise ApiError(400, "切り詰められる余白がありません")
         elif action == "reset-crop":
             pages.reset_crop(entry.doc, targets)
         elif action == "margins":
@@ -306,6 +309,25 @@ def stamp_pages(payload: dict) -> dict:
         raise ApiError(400, str(exc))
     entry.commit()
     return _reload(entry, backup)
+
+
+def stamps_count(payload: dict) -> dict:
+    entry = _doc(payload)
+    return {"stamps": pages.count_stamps(entry.doc)}
+
+
+def stamps_remove(payload: dict) -> dict:
+    """Take back the watermark / page numbers / serial numbers this app put on."""
+    entry = _doc(payload)
+    kinds = set(payload.get("kinds") or []) or None
+    found = pages.count_stamps(entry.doc)
+    if not any(k in found for k in (kinds or found)):
+        raise ApiError(400, "取り除けるものがありません")
+    _sync(entry, payload)
+    backup = entry.snapshot("before-remove-stamps")
+    removed = pages.remove_stamps(entry.doc, kinds)
+    entry.commit()
+    return {**_reload(entry, backup), "removed": removed}
 
 
 def redact_apply(payload: dict) -> dict:
@@ -483,11 +505,27 @@ def fields_delete(payload: dict) -> dict:
     return {"fields": forms.read_fields(entry.doc)}
 
 
+def _undoable(entry: session.Doc, payload: dict, label: str) -> str | None:
+    """When the caller wants the change to be undoable: bring the markup up to date, then snapshot."""
+    if not payload.get("undoable"):
+        return None
+    _sync(entry, payload)
+    return entry.snapshot(label)
+
+
+def _finish(entry: session.Doc, backup: str | None, extra: dict) -> dict:
+    """A plain answer for a quiet edit, or a full description when it was snapshotted (the page reloads)."""
+    if backup is None:
+        return extra
+    return {**_reload(entry, backup), **extra}
+
+
 def fields_fill(payload: dict) -> dict:
     entry = _doc(payload)
+    backup = _undoable(entry, payload, "before-fields")
     filled = forms.fill(entry.doc, payload.get("values") or {})
     entry.commit()
-    return {"filled": filled, "fields": forms.read_fields(entry.doc)}
+    return _finish(entry, backup, {"filled": filled, "fields": forms.read_fields(entry.doc)})
 
 
 def fields_detect(payload: dict) -> dict:
@@ -495,10 +533,12 @@ def fields_detect(payload: dict) -> dict:
     page = entry.doc[int(payload.get("page", 0))]
     candidates = forms.autodetect(page)
     if payload.get("create"):
+        backup = _undoable(entry, payload, "before-detect-fields")
+        page = entry.doc[int(payload.get("page", 0))]
         for index, spec in enumerate(candidates):
             forms.create_field(page, {**spec, "name": f"auto_{page.number}_{index}"})
         entry.commit()
-        return {"created": len(candidates), "fields": forms.read_fields(entry.doc)}
+        return _finish(entry, backup, {"created": len(candidates), "fields": forms.read_fields(entry.doc)})
     return {"candidates": candidates}
 
 
@@ -506,9 +546,10 @@ def fields_import(payload: dict) -> dict:
     entry = _doc(payload)
     raw = payload.get("text") or ""
     values = json.loads(raw) if raw.lstrip().startswith("{") else forms.from_fdf(raw)
+    backup = _undoable(entry, payload, "before-fields-import")
     filled = forms.fill(entry.doc, values)
     entry.commit()
-    return {"filled": filled, "fields": forms.read_fields(entry.doc)}
+    return _finish(entry, backup, {"filled": filled, "fields": forms.read_fields(entry.doc)})
 
 
 def compare_diff(payload: dict) -> dict:
@@ -719,11 +760,13 @@ def compress_document(payload: dict) -> dict:
 
 def outline_set(payload: dict) -> dict:
     entry = _doc(payload)
+    _sync(entry, payload)
+    backup = entry.snapshot("before-outline")
     try:
         pages.set_outline(entry.doc, payload.get("toc") or [])
     except Exception as exc:
         raise ApiError(400, f"しおりを保存できませんでした: {exc}")
-    return {"toc": entry.doc.get_toc(simple=True)}
+    return _reload(entry, backup)
 
 
 def fit_paper(payload: dict) -> dict:
@@ -742,18 +785,22 @@ def outline_auto(payload: dict) -> dict:
     toc = pages.auto_outline(entry.doc)
     if not toc:
         raise ApiError(400, "見出しになりそうな文字が見つかりませんでした（スキャンした文書は、先に文字認識をしてください）")
+    _sync(entry, payload)
+    backup = entry.snapshot("before-outline-auto")
     pages.set_outline(entry.doc, toc)
-    return {"toc": entry.doc.get_toc(simple=True)}
+    return _reload(entry, backup)
 
 
 def metadata_set(payload: dict) -> dict:
     entry = _doc(payload)
+    _sync(entry, payload)
+    backup = entry.snapshot("before-metadata")
     metadata = dict(entry.doc.metadata or {})
     for key in ("title", "author", "subject", "keywords"):
         if key in payload:
             metadata[key] = payload.get(key) or ""
     entry.doc.set_metadata(metadata)
-    return {"metadata": entry.doc.metadata or {}}
+    return _reload(entry, backup)
 
 
 def ocr_apply(payload: dict) -> dict:
@@ -1115,6 +1162,8 @@ _JSON_ROUTES = {
     "pages.action": page_action,
     "merge": merge,
     "stamp-pages": stamp_pages,
+    "stamps.count": stamps_count,
+    "stamps.remove": stamps_remove,
     "redact.apply": redact_apply,
     "redact.search": redact_search,
     "scrub": scrub_document,

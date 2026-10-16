@@ -161,6 +161,23 @@ export async function addMargins() {
   if (result) toast('余白を足しました（Ctrl+Z で戻せます）');
 }
 
+export async function autoCrop() {
+  const values = await formDialog({
+    title: '余白を自動で切る',
+    intro: '文字・図・画像・書き込みがある範囲だけを残して、まわりの余白をトリミングします。「余白を足す」の反対の操作です。中身は消えず、「トリミングを解除」でいつでも元の大きさに戻せます。',
+    fields: [
+      { key: 'padding', label: '残す余白（mm）', type: 'number', value: 5, min: 0, max: 50, step: 1 },
+      { key: 'scope', label: '対象', type: 'select', options: { all: 'すべてのページ', picked: `${describePages(targetPages())}だけ` } },
+    ],
+    confirmLabel: '切る',
+  });
+  if (!values) return;
+  const result = await structural('/pages/autocrop', {
+    pages: values.scope === 'all' ? [] : targetPages(), padding: (values.padding * 72) / 25.4,
+  }, { label: '余白のトリミング' });
+  if (result) toast('余白を切りました（Ctrl+Z、または「トリミングを解除」で戻せます）');
+}
+
 export async function fitPaper() {
   const count = model.store.annots.length;
   const values = await formDialog({
@@ -350,6 +367,28 @@ export async function addBates() {
   if (result) toast('通し番号を振りました（Ctrl+Z で戻せます）');
 }
 
+export async function removeStamps() {
+  const response = await post('/stamps-count', {});
+  const found = response.ok ? (await response.json()).stamps || {} : {};
+  const labels = { watermark: '透かし', headerFooter: 'ページ番号・ヘッダー・フッター', bates: '通し番号' };
+  const kinds = Object.keys(labels).filter((k) => found[k]);
+  if (!kinds.length) {
+    toast('取り除けるものがありません。このアプリで入れた透かし・ページ番号・通し番号だけが対象です', 'warn');
+    return;
+  }
+  const values = await formDialog({
+    title: '入れた透かし・ページ番号を取り除く',
+    intro: 'このアプリで入れたものだけを、すべてのページから取り除きます。別のソフトで入れたものや、元からある文字は消えません。',
+    warning: UNDO_NOTE,
+    fields: kinds.map((k) => ({ key: k, label: `${labels[k]}（${found[k]} ページ）`, type: 'checkbox', value: true })),
+    validate: (v) => (kinds.some((k) => v[k]) ? null : '取り除くものを選んでください'),
+    confirmLabel: '取り除く',
+  });
+  if (!values) return;
+  const result = await structural('/stamps-remove', { kinds: kinds.filter((k) => values[k]) }, { label: '取り除き' });
+  if (result) toast(`${result.removed} か所を取り除きました（Ctrl+Z で戻せます）`);
+}
+
 export async function searchReplaceText() {
   const values = await formDialog({
     title: '本文を検索して置換',
@@ -419,11 +458,6 @@ export async function importXfdf(file) {
 
 // ---------------------------------------------------------------- forms
 
-async function reloadCurrent() {
-  const response = await fetch(docUrl(''));
-  if (response.ok) { await reloadFrom(await response.json()); hooks.refreshAll(); }
-}
-
 export async function showFields() {
   const data = await (await fetch(docUrl('/fields'))).json();
   if (data.hasXfa) {
@@ -459,15 +493,8 @@ export async function showFields() {
     const value = values[field.name];
     payload[field.name] = field.type === 'checkbox' ? (value ? 'Yes' : 'Off') : value;
   }
-  const saved = await post('/annots', {}, { withAnnots: true });
-  if (!saved.ok) { toast('入力に失敗しました', 'error'); return; }
-  const response = await post('/fields/fill', { values: payload });
-  if (!response.ok) { toast(`入力に失敗しました: ${await errorDetail(response)}`, 'error'); return; }
-  const result = await response.json();
-  await reloadCurrent();
-  state.unsaved = true;
-  hooks.refreshAll();
-  toast(`${result.filled} 個の入力欄に入力しました`);
+  const result = await structural('/fields/fill', { values: payload, undoable: true }, { label: '入力' });
+  if (result) toast(`${result.filled} 個の入力欄に入力しました（Ctrl+Z で戻せます）`);
 }
 
 export async function detectFields() {
@@ -481,12 +508,8 @@ export async function detectFields() {
     confirmLabel: '作成する',
   });
   if (!ok) return;
-  await post('/annots', {}, { withAnnots: true });
-  const result = await (await post('/fields/detect', { page: viewer.currentPage, create: true })).json();
-  await reloadCurrent();
-  state.unsaved = true;
-  hooks.refreshAll();
-  toast(`${result.created} 個の入力欄を作成しました`);
+  const result = await structural('/fields/detect', { page: viewer.currentPage, create: true, undoable: true }, { label: '入力欄の作成' });
+  if (result) toast(`${result.created} 個の入力欄を作成しました（Ctrl+Z で戻せます）`);
 }
 
 export async function exportFields(fmt) {
@@ -496,16 +519,18 @@ export async function exportFields(fmt) {
 }
 
 export async function importFields(file) {
-  if (!file) return;
+  if (!file || !model.store.docId) return;
+  const saved = await post('/annots', {}, { withAnnots: true });
+  if (!saved.ok) { toast('読み込めませんでした', 'error'); return; }
   const form = new FormData();
   form.append('file', file);
   const response = await fetch(docUrl('/fields/import'), { method: 'POST', body: form });
-  if (!response.ok) { toast('読み込めませんでした', 'error'); return; }
+  if (!response.ok) { toast(`読み込めませんでした: ${await errorDetail(response)}`, 'error'); return; }
   const result = await response.json();
-  await reloadCurrent();
+  await reloadFrom(result);
   state.unsaved = true;
   hooks.refreshAll();
-  toast(`${result.filled} 個の入力欄に読み込みました`);
+  toast(`${result.filled} 個の入力欄に読み込みました（Ctrl+Z で戻せます）`);
 }
 
 export async function collateFields(files) {
@@ -619,8 +644,8 @@ export async function documentProperties() {
     confirmLabel: '保存',
   });
   if (!values) return;
-  const response = await post('/metadata', values);
-  if (response.ok) { state.unsaved = true; hooks.refreshAll(); toast('プロパティを更新しました'); }
+  const result = await structural('/metadata', values, { label: 'プロパティの更新' });
+  if (result) toast('プロパティを更新しました');
 }
 
 // ---------------------------------------------------------------- accessibility

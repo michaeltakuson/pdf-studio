@@ -296,6 +296,37 @@ async function chooseFile() {
   }
 }
 
+/** The other half of "open": put the document away and go back to the start screen. */
+async function closeDocument() {
+  if (!hasDoc()) return;
+  if (!(await confirmDiscard())) return;
+  flushEditing();
+  clearTimeout(draftTimer);
+  const id = model.store.docId;
+  // Closing on purpose means the unsaved markup was let go, so do not offer it back next time.
+  if (state.draftKey) clearDraft(state.draftKey);
+  await viewer.clear();
+  model.loadDocument({ id: null, name: '', pages: [], annots: [] });
+  state.preview = null;
+  state.fileHandle = null;
+  state.draftKey = null;
+  state.toc = [];
+  state.unsaved = false;
+  state.pageSelection.clear();
+  state.textLines.clear();
+  state.searchHits = [];
+  state.searchIndex = -1;
+  setSearchCount('');
+  if (state.study) toggleStudy();
+  selectTool('select');
+  $('#emptyState').classList.remove('hidden');
+  renderThumbs($('#panelThumbs'), viewer, { current: 0, selected: new Set() }, thumbHandlers);
+  renderOutlinePanel();
+  refreshAll();
+  status('準備完了 — PDFを開いてください');
+  if (id && id !== 'preview') fetch(`/api/doc/${id}/close`, { method: 'POST' }).catch(() => {});
+}
+
 async function newBlank() {
   if (!(await confirmDiscard())) return;
   const values = await formDialog({
@@ -2181,12 +2212,7 @@ const thumbHandlers = {
 };
 
 async function saveOutline(toc) {
-  const response = await post('/outline', { toc });
-  if (!response.ok) { toast(`しおりを保存できませんでした: ${await errorDetail(response)}`, 'error'); return; }
-  state.toc = (await response.json()).toc || [];
-  state.unsaved = true;
-  renderOutlinePanel();
-  refreshPanels();
+  await structural('/outline', { toc }, { label: 'しおりの更新' });
 }
 
 function renderOutlinePanel() {
@@ -2202,13 +2228,8 @@ function renderOutlinePanel() {
         });
         if (!ok) return;
       }
-      const response = await post('/outline-auto', {});
-      if (!response.ok) { toast(await errorDetail(response), 'warn'); return; }
-      state.toc = (await response.json()).toc || [];
-      state.unsaved = true;
-      renderOutlinePanel();
-      refreshPanels();
-      toast(`見出しから ${state.toc.length} 件のしおりを作りました`);
+      const result = await structural('/outline-auto', {}, { label: 'しおりの作成' });
+      if (result) toast(`見出しから ${state.toc.length} 件のしおりを作りました（Ctrl+Z で戻せます）`);
     },
     onAdd: async () => {
       const page = viewer.currentPage + 1;
@@ -2682,6 +2703,7 @@ const commands = {
   whiteout: tool('whiteout', '修正テープ', 'whiteout', { title: '修正テープ（囲んだところを紙の色で隠す。上から書き直せます。隠すだけで、文字はファイルに残ります）' }),
   snapshot: tool('snapshot', '切り抜きコピー', 'snapshot', { short: '切り抜き\nコピー', title: '切り抜きコピー（囲んだ範囲を画像としてコピー。図や表をレポート・ノートに貼るときに）' }),
   crop: tool('crop', 'トリミング', 'crop', { title: 'トリミング（囲んだ範囲だけを表示する）' }),
+  autocrop: { label: '余白を自動で切る', icon: 'crop', short: '余白を\n自動で切る', title: '文字や図のある範囲だけを残して、余白をトリミング（「余白を足す」の反対）', run: ops.autoCrop, ...needsDoc },
   uncrop: { label: 'トリミングを解除', icon: 'crop', title: 'トリミングを解除して、ページ全体を表示する',
     run: async () => { const r = await structural('/pages/reset-crop', { pages: model.store.pages.map((_, i) => i) }, { label: '解除' }); if (r) toast('ページ全体の表示に戻しました'); }, ...needsDoc },
   study: { label: '暗記シート', icon: 'study', title: '暗記シート（マーカーを引いたところを隠す。クリックで答え合わせ）', run: toggleStudy, active: () => state.study, ...needsDoc },
@@ -2710,6 +2732,7 @@ const commands = {
   headerfooter: { label: 'ページ番号', icon: 'number', title: 'ページ番号・ヘッダー・フッターを入れる', run: ops.addHeaderFooter, ...needsDoc },
   watermark: { label: '透かし', icon: 'watermark', run: ops.addWatermark, ...needsDoc },
   bates: { label: '通し番号', icon: 'headerfooter', title: '通し番号（ベイツ番号）を振る', run: ops.addBates, ...needsDoc },
+  removestamps: { label: '取り除く', icon: 'trash', title: '入れた透かし・ページ番号・通し番号を取り除く', run: ops.removeStamps, ...needsDoc },
   // review
   comments: { label: 'コメント一覧', icon: 'comments', short: 'コメント\n一覧', title: '書き込みの一覧（返信・ステータス・絞り込み）', run: () => showRightPanel('comments') },
   redact: tool('redact', '墨消し', 'redact', { title: '墨消しの指定（消したい場所を囲む。「適用」で実際に消える）' }),
@@ -2822,7 +2845,7 @@ const tabs = [
     { label: 'テキスト', items: [{ big: 'freetext' }, { col: ['callout', 'note', 'date'] }, { col: ['snippet'] }] },
     { label: '図形', items: [{ col: ['line', 'arrow', 'polyline'] }, { col: ['square', 'circle', 'polygon'] }] },
     { label: '画像・印', items: [{ big: 'image' }, { big: 'hanko' }, { big: 'signature' }, { col: ['stamp', 'mark', 'whiteout'] }] },
-    { label: 'ページに入れる', items: [{ col: ['headerfooter', 'watermark', 'bates'] }] },
+    { label: 'ページに入れる', items: [{ col: ['headerfooter', 'watermark', 'bates'] }, { col: ['removestamps'] }] },
     { label: 'フォント', items: [custom(fontGroup)] },
     { label: '書式', items: [custom(styleGroup)] },
   ] },
@@ -2836,7 +2859,7 @@ const tabs = [
     { label: '回転', items: [{ big: 'rotatecw' }, { col: ['rotateccw', 'rotateall'] }] },
     { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }] },
     { label: '結合・分割', items: [{ big: 'merge' }, { col: ['extract', 'split'] }, { big: 'organize' }] },
-    { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'headerfooter'] }, { col: ['crop', 'uncrop', 'fitpaper'] }] },
+    { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'fitpaper'] }, { col: ['crop', 'uncrop', 'autocrop'] }] },
     { label: '対象', items: [custom(() => h('div', { class: 'rhint', text: hasDoc()
       ? `対象: ${describePages(targetPages())}。左のページ一覧で Ctrl / Shift を押しながら選ぶと、複数ページをまとめて操作できます。`
       : 'PDFを開くと、ページの回転・削除・並べ替え・結合ができます。' }),
@@ -2879,6 +2902,8 @@ function fileMenu(anchor) {
     { label: '画像からPDFを作る…', icon: 'image', action: () => convert.imagesToPdf() },
     { label: 'Word・PowerPoint・Excel をPDFにする…', icon: 'topdf', action: () => convert.officeToPdf('any') },
     { label: '複数のPDFを結合して新しく作る…', icon: 'merge', action: () => convert.mergePdfs() },
+    '-',
+    { label: '閉じる', icon: 'close', disabled: !open, action: closeDocument },
     '-',
     { label: '上書き保存', icon: 'save', key: 'Ctrl+S', disabled: !open, action: () => saveToDisk() },
     { label: '名前を付けて保存…', icon: 'saveas', key: 'Ctrl+Shift+S', disabled: !open, action: () => saveToDisk({ saveAs: true }) },
