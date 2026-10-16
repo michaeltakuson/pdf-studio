@@ -404,11 +404,19 @@ async function showRecent() {
   holder.append(h('h2', { text: '最近使ったファイル' }));
   for (const item of list) {
     const when = new Date(item.at).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' });
-    holder.append(h('button', {
-      class: 'recent-item', title: `${item.name} を開く`,
-      html: iconSvg('pageblank', 17),
-      onclick: () => openRecent(item),
-    }, [h('span', { class: 'name', text: item.name }), h('span', { class: 'when', text: when })]));
+    // the row opens the file; the small × takes it off the list (the file itself is untouched)
+    holder.append(h('div', { class: 'recent-row' }, [
+      h('button', {
+        class: 'recent-item', title: `${item.name} を開く`,
+        html: iconSvg('pageblank', 17),
+        onclick: () => openRecent(item),
+      }, [h('span', { class: 'name', text: item.name }), h('span', { class: 'when', text: when })]),
+      h('button', {
+        class: 'icon-btn recent-forget', type: 'button', title: '一覧から消す（ファイルは消えません）', 'aria-label': `${item.name} を一覧から消す`,
+        html: iconSvg('close', 14),
+        onclick: async () => { await forgetFile(item.name); showRecent(); },
+      }),
+    ]));
   }
 }
 
@@ -575,6 +583,11 @@ function refreshPanels() {
           });
           toast('返信を追加しました');
         },
+        onDeleteReply: (id, replyId) => {
+          const annot = model.byId(id);
+          if (annot) model.updateAnnots([id], { replies: (annot.replies || []).filter((r) => r.id !== replyId) });
+        },
+        onDelete: (annot) => { model.removeAnnots([annot.id]); toast('書き込みを削除しました（Ctrl+Z で戻せます）'); },
         onBulk: (action, items) => {
           if (action !== 'select') return;
           selectTool('select');

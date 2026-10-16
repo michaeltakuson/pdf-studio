@@ -845,3 +845,18 @@ body.present .annot-layer .hit, body.present .text-layer, body.present .form-lay
 .tool-grid { grid-template-columns: repeat(4, 1fr); }
 .tool-card { padding: 8px 4px 7px; }
 @media (max-width: 560px) { .tool-grid { grid-template-columns: repeat(2, 1fr); } }
+
+/* comments: delete a reply / the comment itself */
+.comment-actions > .spacer { display: none; }
+.comment-actions > .btn.small { flex: 0 0 auto; }
+.comment-reply .comment-head { align-items: center; }
+.comment-reply .comment-head .icon-btn { padding: 1px; opacity: .6; }
+.comment-reply .comment-head .icon-btn:hover { opacity: 1; }
+
+/* recent files: the row, with a small remove button that appears on hover */
+.recent-row { display: flex; align-items: center; gap: 2px; }
+.recent-row .recent-item { flex: 1; min-width: 0; }
+.recent-forget { opacity: 0; flex: none; }
+.recent-row:hover .recent-forget, .recent-forget:focus-visible { opacity: .7; }
+.recent-forget:hover { opacity: 1; }
+@media (hover: none) { .recent-forget { opacity: .5; } }

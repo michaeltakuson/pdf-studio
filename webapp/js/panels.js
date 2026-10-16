@@ -418,7 +418,7 @@ function summaryOf(annot) {
 }
 
 export function renderComments(container, {
-  annots, selection, filters, onSelect, onFilter, onPatch, onReply, onBulk,
+  annots, selection, filters, onSelect, onFilter, onPatch, onReply, onDeleteReply, onDelete, onBulk,
 }) {
   container.textContent = '';
 
@@ -489,7 +489,15 @@ export function renderComments(container, {
 
     for (const reply of annot.replies || []) {
       item.append(h('div', { class: 'comment-reply' }, [
-        h('div', { class: 'comment-head' }, [h('span', { text: reply.author || '返信' })]),
+        h('div', { class: 'comment-head' }, [
+          h('span', { text: reply.author || '返信' }),
+          h('span', { class: 'spacer' }),
+          // a reply that was added can be taken back
+          onDeleteReply ? h('button', {
+            class: 'icon-btn', type: 'button', title: 'この返信を削除', 'aria-label': 'この返信を削除', html: iconSvg('close', 14),
+            onclick: (e) => { e.stopPropagation(); onDeleteReply(annot.id, reply.id); },
+          }) : null,
+        ]),
         h('div', { text: reply.contents || '' }),
       ]));
     }
@@ -498,6 +506,8 @@ export function renderComments(container, {
       item.append(h('div', { class: 'comment-actions', onclick: (e) => e.stopPropagation() }, [
         select(STATE_CHOICES, String(annot.state ?? 'null'),
           (value) => onPatch(annot.id, { state: value === 'null' ? null : value })),
+        h('span', { class: 'spacer' }),
+        onDelete ? h('button', { class: 'btn small', type: 'button', text: '削除', title: 'この書き込みを削除（Ctrl+Z で戻せます）', onclick: () => onDelete(annot) }) : null,
       ]));
       item.append(h('div', { class: 'comment-actions', onclick: (e) => e.stopPropagation() }, [
         h('input', {
