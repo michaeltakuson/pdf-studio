@@ -373,7 +373,10 @@ export class Viewer extends EventTarget {
       // Side by side, each page gets half the width (less the gap between them).
       const columns = this.spread ? 2 : 1;
       const available = (this.stage.clientWidth - padding - (columns - 1) * 16) / columns;
-      let scale = available / target.width;
+      // "Fit width" means no page runs past the edge of the screen: take the widest page. Taking the page being read
+      // made every other page enormous as soon as one of them was narrow (a cropped page, a small insert).
+      const widest = Math.max(target.width, ...this.pageViews.map((view) => view.width));
+      let scale = available / (this.zoomMode === 'fit-width' ? widest : target.width);
       if (this.zoomMode === 'fit-page') {
         scale = Math.min(scale, (this.stage.clientHeight - padding) / target.height);
       }
