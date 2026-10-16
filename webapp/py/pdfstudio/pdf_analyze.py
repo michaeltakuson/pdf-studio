@@ -341,6 +341,62 @@ def merge_row_blocks(blocks: list[Block]) -> list[Block]:
     return out
 
 
+_BULLET_START = re.compile(r"^(?:[・•●○▪■◆◇★☆※\-–—‣◦▶▷]|[（(]?\d+[\.\)）．、]|[①-⑳]|[（(][0-9a-zA-Zぁ-んァ-ン一-龥０-９]+[）)])")
+
+
+def merge_paragraph_blocks(blocks: list[Block]) -> list[Block]:
+    """Lines that the page already wraps into one paragraph become one block.
+
+    Many producers (Google Docs, Skia, some print drivers) write every visual line as a block of its own, so the
+    converters would otherwise hand back one paragraph per line. A line joins the block above when it sits at
+    line spacing, starts where that block's text starts, is in the same type, and the line above ran right up to the
+    margin — a line that stops short ended its paragraph.
+    """
+    lines_all = [ln for b in blocks if not any(l.vertical for l in b.lines) for ln in b.lines]
+    wide = [ln.bbox[2] for ln in lines_all if len(line_text(ln).strip()) >= 15]
+    if not wide:
+        return blocks
+    edge = max(wide)
+    out: list[Block] = []
+    for blk in sorted(blocks, key=lambda b: (round(b.bbox[1]), b.bbox[0])):
+        if blk.lines and not any(l.vertical for l in blk.lines):
+            target = None
+            for prev in reversed(out[-6:]):
+                if any(l.vertical for l in prev.lines):
+                    continue
+                last = prev.lines[-1]
+                first = blk.lines[0]
+                gap = first.bbox[1] - last.bbox[3]
+                size = prev.size
+                if abs(size - blk.size) > 0.6 or not (-0.3 * size <= gap <= 0.7 * size):
+                    continue
+                if last.bbox[2] < edge - 1.5 * size:
+                    continue                    # the line above stopped short: that paragraph is finished
+                if _BULLET_START.match(line_text(first).lstrip()):
+                    continue
+                # where the text of the line above starts: its own left, or after a label and a tab
+                starts = {round(last.bbox[0])}
+                for i, sp in enumerate(last.spans):
+                    if sp.text == "	" and i + 1 < len(last.spans):
+                        starts.add(round(last.spans[i + 1].bbox[0]))
+                # a wrapped line starts where the text above starts — or further in (a hanging or indented continuation)
+                if first.bbox[0] < min(starts) - 2.0:
+                    continue
+                bold_a = next((sp.bold for sp in last.spans if sp.text.strip()), False)
+                bold_b = next((sp.bold for sp in first.spans if sp.text.strip()), False)
+                if bold_a != bold_b:
+                    continue
+                target = prev
+                break
+            if target is not None:
+                target.lines = target.lines + blk.lines
+                target.bbox = (min(target.bbox[0], blk.bbox[0]), min(target.bbox[1], blk.bbox[1]),
+                               max(target.bbox[2], blk.bbox[2]), max(target.bbox[3], blk.bbox[3]))
+                continue
+        out.append(blk)
+    return out
+
+
 def cell_lines(blocks: list[Block], placed: dict, bbox: tuple, nearest=None) -> dict:
     """Text of a table, by cell: ``{key: [Line]}``. Each span goes to the cell its centre falls in, so a line that
     runs across several columns is split between them."""

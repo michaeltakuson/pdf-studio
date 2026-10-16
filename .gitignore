@@ -21,3 +21,7 @@ __pycache__/
 
 # NOTE: frontend/vendor/pdfjs/ is deliberately NOT ignored. The app renders
 # every page with it and works offline, so the viewer ships with the source.
+
+# scratch files from testing with real documents
+tests/real/*
+!tests/real/*.py

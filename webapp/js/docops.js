@@ -211,7 +211,7 @@ export async function exportImages() {
     title: 'ページを画像にする',
     intro: '書き込みも含めた見た目のまま画像にします。複数ページはZIPにまとめます。',
     fields: [
-      { key: 'scope', label: '対象', type: 'select', options: { picked: describePages(pages), all: `すべてのページ（${model.store.pages.length}）` } },
+      { key: 'scope', label: '対象', type: 'select', value: state.pageSelection.size ? 'picked' : 'all', options: { picked: describePages(pages), all: `すべてのページ（${model.store.pages.length}）` } },
       { key: 'format', label: '形式', type: 'select', options: { png: 'PNG（くっきり）', jpg: 'JPEG（軽い）' } },
       { key: 'dpi', label: '解像度', type: 'select', value: '150', options: { 96: '96 dpi（画面用）', 150: '150 dpi（標準）', 200: '200 dpi', 300: '300 dpi（印刷用）' } },
       { key: 'quality', label: 'JPEGの画質', type: 'select', value: '85', options: { 70: '標準（軽い）', 85: '高画質', 95: '最高画質' }, showWhen: (v) => v.format === 'jpg' },

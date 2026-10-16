@@ -22,7 +22,7 @@ from xml.sax.saxutils import escape
 
 import pymupdf
 
-from .pdf_analyze import (Block, Line, PageInfo, Span, analyze_page, block_text_lines, inside, line_text, merge_row_blocks, word_font, cell_lines)
+from .pdf_analyze import (Block, Line, PageInfo, Span, analyze_page, block_text_lines, inside, line_text, merge_row_blocks, merge_paragraph_blocks, word_font, cell_lines)
 
 EMU = 12700
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
@@ -345,6 +345,7 @@ class DocxFromPdf:
         self._img_id = 100
         self.warnings: list[str] = []
         self._repeat = self._find_repeating()
+        self._flow_margins: tuple | None = None
 
     # ---- helpers
     def _image_part(self, data: bytes, ext: str) -> str:
@@ -416,8 +417,52 @@ class DocxFromPdf:
             pass
         return tmp, page
 
+    def _cheap_scanned(self, page) -> bool:
+        try:
+            return len(page.get_text().strip()) < 5 and bool(page.get_images())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _prepass_margins(self) -> tuple | None:
+        """One set of margins for the whole document (the widest text area any page uses).
+
+        Page by page margins make the text area jump between pages and turn a short last page into a page with a
+        huge margin. A single set also lets the pages run on into each other like a document written in Word.
+        """
+        lefts, rights, tops, bottoms = [], [], [], []
+        for pno in self.pages:
+            page = self.doc[pno]
+            if self._cheap_scanned(page):
+                continue
+            W, H = page.rect.width, page.rect.height
+            boxes = [b[:4] for b in page.get_text("blocks") if b[6] == 0 and b[4].strip()
+                     and b[3] > H * 0.09 and b[1] < H * 0.91]
+            if not boxes:
+                continue
+            x0 = min(b[0] for b in boxes)
+            x1 = max(b[2] for b in boxes)
+            y0 = min(b[1] for b in boxes)
+            lefts.append(max(18.0, min(x0, W * 0.4)))
+            rights.append(max(18.0, min(W - x1, W * 0.4)))
+            tops.append(max(18.0, min(y0, H * 0.4)))
+            bottoms.append(max(18.0, min(H - max(b[3] for b in boxes), H * 0.4)))
+        if not lefts:
+            return None
+        top = min(tops)
+        return (min(lefts), top, min(rights), min(min(bottoms), max(top, 72.0)))
+
+    def _breaks_after(self, n: int) -> bool:
+        """Does a new section have to start after page `n`? Only when the next page is another size or a picture."""
+        if n + 1 >= len(self.pages):
+            return False
+        a, b = self.doc[self.pages[n]], self.doc[self.pages[n + 1]]
+        return (abs(a.rect.width - b.rect.width) > 1 or abs(a.rect.height - b.rect.height) > 1
+                or self._cheap_scanned(a) or self._cheap_scanned(b))
+
     # ---- main
     def convert(self) -> bytes:
+        if self.mode != "layout":
+            self._flow_margins = self._prepass_margins()
         total = len(self.pages)
         last_info = None
         for n, pno in enumerate(self.pages):
@@ -428,7 +473,7 @@ class DocxFromPdf:
             if self.mode == "layout":
                 self._page_layout(page, pno, info, is_last)
             else:
-                self._page_flow(page, pno, info, is_last)
+                self._page_flow(page, pno, info, is_last, n)
         return self._package(last_info)
 
     def _sect(self, info: PageInfo, margins: tuple, last: bool = False, header_ref: str = "", footer_ref: str = "") -> str:
@@ -497,7 +542,7 @@ class DocxFromPdf:
                         tabs=tab_stops(lines, x0))
 
     # ---- flow mode
-    def _page_flow(self, page, pno, info: PageInfo, is_last: bool):
+    def _page_flow(self, page, pno, info: PageInfo, is_last: bool, n: int = 0):
         W, H = info.width, info.height
         if info.scanned:
             # a picture of the page
@@ -530,7 +575,7 @@ class DocxFromPdf:
                 continue
             elements.append(Element("image", bb, im))
         header_texts, footer_texts = [], []
-        for block in merge_row_blocks(info.blocks):
+        for block in merge_paragraph_blocks(merge_row_blocks(info.blocks)):
             rep = self._is_repeating(block, info)
             if rep:
                 (header_texts if rep == "top" else footer_texts).append(block)
@@ -560,7 +605,11 @@ class DocxFromPdf:
         left = max(18.0, min(x0, W * 0.4))
         right = max(18.0, min(W - x1, W * 0.4))
         top = max(18.0, min(y0, H * 0.4))
-        bottom = max(18.0, min(H - y1, H * 0.4))
+        # A page whose text stops half way down (the last page of a chapter) must not become a page with a huge
+        # bottom margin: that margin would shrink the room for text the moment it is edited or set in another font.
+        bottom = max(18.0, min(H - y1, H * 0.4, max(top, 72.0)))
+        if self._flow_margins:
+            left, top, right, bottom = self._flow_margins
         if self.headers:
             top = max(top, 40.0)
         if self.footers:
@@ -574,6 +623,8 @@ class DocxFromPdf:
         for e in ordered:
             gap = max(0.0, e.bbox[1] - prev_bottom)
             before = min(gap * 0.9, 80.0) if out else 0.0
+            if not out and n > 0 and self._flow_margins and not self._breaks_after(n - 1):
+                before = 14.0     # this page runs on from the one before: keep the breathing space a new page gave
             if e.kind == "text":
                 out.append(self._para_for_block(e.payload, info, left, text_w, before, sizes_rank))
             elif e.kind == "table":
@@ -593,6 +644,9 @@ class DocxFromPdf:
                           footer_ref='<w:footerReference w:type="default" r:id="rIdFtr1"/>' if self.footers else "")
         if is_last:
             self._final_sect = sect
+            self.body.append("".join(out))
+        elif self._flow_margins and not self._breaks_after(n):
+            # same size and margins as the page after it: the text simply runs on, as in a document written in Word
             self.body.append("".join(out))
         else:
             # the section ends in a paragraph of its own so tables and pictures never carry it

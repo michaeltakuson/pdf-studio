@@ -819,6 +819,10 @@ def ocr_apply(payload: dict) -> dict:
         if index < 0 or index >= entry.doc.page_count:
             continue
         page = entry.doc[index]
+        try:
+            page.wrap_contents()   # a page that leaves its graphics state open would turn the new text upside down
+        except Exception:  # noqa: BLE001
+            pass
         writer = pymupdf.TextWriter(page.rect)
         for word in sheet.get("words") or []:
             text = (word.get("text") or "").strip()

@@ -2561,7 +2561,7 @@ async function runOcr() {
     intro: '画像になっている文字を読み取り、検索・選択・マーカーができるようにします。見た目は変わりません。',
     warning: '初回は認識エンジンと言語データ（約20MB）をダウンロードします。1ページあたり数秒〜十数秒かかります。処理はこの端末の中だけで行われます。',
     fields: [
-      { key: 'scope', label: '対象', type: 'select', options: { picked: describePages(targetPages()), all: `すべてのページ（${model.store.pages.length}）` } },
+      { key: 'scope', label: '対象', type: 'select', value: state.pageSelection.size ? 'picked' : 'all', options: { picked: describePages(targetPages()), all: `すべてのページ（${model.store.pages.length}）` } },
       { key: 'lang', label: '言語', type: 'select', options: { 'jpn+eng': '日本語 + 英語', eng: '英語のみ', jpn: '日本語のみ' } },
     ],
     confirmLabel: '認識する',

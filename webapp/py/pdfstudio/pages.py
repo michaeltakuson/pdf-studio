@@ -467,6 +467,19 @@ def _target_pages(doc: pymupdf.Document, pages: list[int] | None) -> list[int]:
 STAMP_MARK = b"%PSSTAMP:"
 
 
+def _isolate(page: pymupdf.Page) -> None:
+    """Make what is drawn next independent of how the page's own content leaves the graphics state.
+
+    Producers such as Skia (Google Docs) open the content with a "1 0 0 -1 0 H cm" and never close it. Text
+    appended after that is drawn upside down and in the wrong place. Wrapping the existing content in q … Q
+    gives the new content a clean start.
+    """
+    try:
+        page.wrap_contents()
+    except Exception:  # noqa: BLE001 - nothing to wrap
+        pass
+
+
 def _tag_new_streams(page: pymupdf.Page, before: set[int], kind: str) -> None:
     """Label the content added since `before`, so the stamp can be found and taken out again later."""
     doc = page.parent
@@ -521,6 +534,7 @@ def watermark(doc: pymupdf.Document, text: str, *, pages=None, colour="#c0c0c0",
     font = _font()
     for index in _target_pages(doc, pages):
         page = doc[index]
+        _isolate(page)
         before = set(page.get_contents())
         rect = page.rect
         writer = pymupdf.TextWriter(rect, opacity=opacity)
@@ -548,6 +562,7 @@ def header_footer(doc: pymupdf.Document, *, header="", footer="", pages=None,
     targets = _target_pages(doc, pages)
     for index in targets:
         page = doc[index]
+        _isolate(page)
         before = set(page.get_contents())
         rect = page.rect
         writer = pymupdf.TextWriter(rect)
@@ -570,6 +585,7 @@ def bates(doc: pymupdf.Document, *, prefix="", start=1, digits=6, suffix="",
     """Sequential numbering across the document — the legal-discovery standard."""
     font = _font()
     for offset, page in enumerate(doc):
+        _isolate(page)
         before = set(page.get_contents())
         label = f"{prefix}{str(start + offset).zfill(digits)}{suffix}"
         rect = page.rect

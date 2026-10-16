@@ -177,6 +177,10 @@ def replace_text(page: pymupdf.Page, rect: list[float], new_text: str, *,
         return
     font = body_font(serif, bold)
     start = pymupdf.Point(origin) if origin else pymupdf.Point(box.x0, box.y1 - size * 0.2)
+    try:
+        page.wrap_contents()   # a page that leaves its graphics state open would turn the new text upside down
+    except Exception:  # noqa: BLE001
+        pass
     writer = pymupdf.TextWriter(page.rect)
     for index, line in enumerate(str(new_text).split("\n")):
         width = font.text_length(line, size)

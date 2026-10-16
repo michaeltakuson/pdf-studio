@@ -316,6 +316,27 @@ def annot_to_json(annot: pymupdf.Annot, doc: pymupdf.Document, page_index: int,
         style["font"]["bold"] = False
         if private.get("font"):
             style["font"].update(private["font"])
+    if kind == "redact":
+        # A mark made by "検索して指定" (or by another program) carries its overlay text only in the standard /OverlayText
+        # entry; read it back, or the next write of the mark would silently drop it. Our own key wins when present.
+        try:
+            o_kind, o_value = doc.xref_get_key(annot.xref, "OverlayText")
+            if o_kind == "string" and o_value and "overlayText" not in private:
+                data["overlayText"] = _pdf_string(o_value)
+        except Exception:
+            pass
+        font_size = None
+        try:
+            fs_kind, fs_value = doc.xref_get_key(annot.xref, "DA")
+            if fs_kind == "string" and fs_value:
+                parsed = _parse_da(doc, annot.xref)
+                if parsed.get("color"):
+                    style["font"]["color"] = parsed["color"]
+                font_size = parsed.get("size")
+        except Exception:
+            pass
+        if font_size:
+            style["font"]["size"] = font_size
     if kind == "image":
         data["image"] = _appearance_png(annot, annot.parent)
         data["contents"] = "" if data["contents"] == "Image Stamp" else data["contents"]
@@ -338,6 +359,19 @@ def annot_to_json(annot: pymupdf.Annot, doc: pymupdf.Document, page_index: int,
             # sits inside the stored one, which means nothing else moved it.
             data["rect"] = authored
     return data
+
+
+def _pdf_string(value: str) -> str:
+    """The text of a PDF string object as PyMuPDF prints it: (…) literal or <FEFF…> hex."""
+    value = value.strip()
+    if value.startswith("<") and value.endswith(">"):
+        raw = bytes.fromhex(value[1:-1])
+        if raw[:2] == b"\xfe\xff":
+            return raw[2:].decode("utf-16-be", "replace")
+        return raw.decode("latin-1")
+    if value.startswith("(") and value.endswith(")"):
+        value = value[1:-1]
+    return value.replace("\\(", "(").replace("\\)", ")").replace("\\\\", "\\")
 
 
 def _encloses(outer: list[float], inner: list[float], tolerance: float = 0.6) -> bool:
