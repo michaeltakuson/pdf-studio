@@ -19,11 +19,13 @@ fetch shim expects.
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 
 import pymupdf
 
-from . import accessibility, annots, compare, content, export, forms, measure, pages, session, signing
+from . import accessibility, annots, compare, content, convert as convert_mod, export, forms, measure, pages, session, signing
 from .common import page_info, rect_to_page, to_view
 
 
@@ -620,12 +622,73 @@ def from_images(payload: dict) -> dict:
     if not files:
         raise ApiError(400, "画像が選ばれていません")
     try:
-        data = pages.images_to_pdf(files)
+        data = convert_mod.images_to_pdf(
+            files, orientation=payload.get("orientation") or "auto", paper=payload.get("paper") or "a4",
+            margin=float(payload.get("margin", 18)))
     except ValueError as exc:
         raise ApiError(400, str(exc))
     stem = files[0][0].rsplit(".", 1)[0]
     entry = session.create(f"{stem}.pdf", data)
     return _describe(entry)
+
+
+def merge_files(payload: dict) -> dict:
+    """Join several PDFs (in the order given) into a new document."""
+    sources = [{"name": f.get("filename") or "文書", "data": _bytes(f.get("data")), "ranges": f.get("ranges") or ""}
+               for f in payload.get("files") or []]
+    if not sources:
+        raise ApiError(400, "PDF が選ばれていません")
+    try:
+        data = convert_mod.merge_pdfs(sources, bookmarks=bool(payload.get("bookmarks")))
+    except convert_mod.ConvertError as exc:
+        raise ApiError(400, str(exc))
+    except Exception as exc:
+        raise ApiError(500, f"結合できませんでした: {exc}")
+    first = sources[0]["name"].rsplit(".", 1)[0]
+    name = f"{first}_結合.pdf" if len(sources) > 1 else f"{first}.pdf"
+    entry = session.create(name, data)
+    return _describe(entry)
+
+
+def organize(payload: dict) -> dict:
+    """Rebuild the document from a list of pages: ``items`` of {src, page, rotate}; src -1 is this document,
+    otherwise an index into the extra ``files`` sent along."""
+    entry = _doc(payload)
+    _sync(entry, payload)
+    items = payload.get("items") or []
+    if not items:
+        raise ApiError(400, "ページが 1 枚もありません")
+    extra = []
+    for f in payload.get("files") or []:
+        try:
+            extra.append(pymupdf.open("pdf", _bytes(f.get("data"))))
+        except Exception as exc:
+            raise ApiError(400, f"{f.get('filename') or 'ファイル'} を PDF として開けませんでした: {exc}")
+    backup = entry.snapshot("before-organize")
+    out = pymupdf.open()
+    try:
+        for item in items:
+            if item.get("blank"):
+                out.new_page(width=float(item.get("w") or 595), height=float(item.get("h") or 842))
+            else:
+                src = int(item.get("src", -1))
+                source = entry.doc if src < 0 else extra[src]
+                index = int(item["page"])
+                out.insert_pdf(source, from_page=index, to_page=index)
+            turn = int(item.get("rotate", 0)) % 360
+            if turn:
+                page = out[out.page_count - 1]
+                page.set_rotation((page.rotation + turn) % 360)
+        data = out.tobytes(garbage=3, deflate=True)
+    except Exception as exc:
+        raise ApiError(400, f"ページを並べ替えられませんでした: {exc}")
+    finally:
+        out.close()
+        for d in extra:
+            d.close()
+    entry.replace(data)
+    entry.commit()
+    return _reload(entry, backup)
 
 
 def compress_document(payload: dict) -> dict:
@@ -864,6 +927,19 @@ def _split(payload: dict):
     entry = _doc(payload)
     _sync(entry, payload)
     try:
+        if payload.get("sizeMB"):
+            data = convert_mod.split_by_size(entry.doc, _stem(entry), int(float(payload["sizeMB"]) * 1024 * 1024))
+            return f"{_stem(entry)}-分割.zip", "application/zip", data
+        if payload.get("single"):
+            # the chosen page ranges, joined into one new PDF (no zip)
+            groups = pages.parse_ranges(payload.get("ranges", ""), entry.doc.page_count)
+            out = pymupdf.open()
+            for group in groups:
+                for index in group:
+                    out.insert_pdf(entry.doc, from_page=index, to_page=index)
+            data = out.tobytes(garbage=3, deflate=True)
+            out.close()
+            return f"{_stem(entry)}-抽出.pdf", "application/pdf", data
         data = pages.split(entry.doc, _stem(entry), ranges=payload.get("ranges", ""),
                            every=int(payload.get("every") or 0))
     except ValueError as exc:
@@ -871,11 +947,108 @@ def _split(payload: dict):
     return f"{_stem(entry)}-分割.zip", "application/zip", data
 
 
+def _extract_images(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    wanted = payload.get("pages")
+    data, count = convert_mod.extract_images(entry.doc, _stem(entry), [int(p) for p in wanted] if wanted else None,
+                                             fmt=payload.get("format") or "original")
+    if count == 0:
+        raise ApiError(400, "この文書には取り出せる画像がありません（文字や図形だけのページは「ページを画像にする」を使います）")
+    return f"{_stem(entry)}-画像.zip", "application/zip", data, {"count": count}
+
+
+def _office_to_pdf(payload: dict):
+    files = payload.get("files") or []
+    if not files:
+        raise ApiError(400, "ファイルが選ばれていません")
+    results = []
+    warnings = []
+    failed = []
+    for f in files:
+        name = f.get("filename") or "文書"
+        try:
+            pdf, warn = convert_mod.office_to_pdf(name, _bytes(f.get("data")))
+        except convert_mod.ConvertError as exc:
+            failed.append([name, str(exc)])
+            continue
+        except MemoryError:
+            failed.append([name, "メモリが足りず変換できませんでした。ファイルを小さくして試してください"])
+            continue
+        except Exception as exc:
+            failed.append([name, f"変換できませんでした（{exc}）"])
+            continue
+        results.append((name.rsplit(".", 1)[0] + ".pdf", pdf))
+        warnings += [f"{name}: {w}" for w in warn]
+    if not results:
+        if len(failed) == 1:
+            raise ApiError(400, f"{failed[0][0]}: {failed[0][1]}")
+        raise ApiError(400, "変換できるファイルがありませんでした。" + chr(10) + chr(10).join(f"{n}: {m}" for n, m in failed[:5]))
+    meta = {"warnings": warnings, "failed": failed}
+    if len(results) == 1:
+        return results[0][0], "application/pdf", results[0][1], meta
+    if payload.get("merge"):
+        data = convert_mod.merge_pdfs([{"name": n, "data": d} for n, d in results], bookmarks=True)
+        first = results[0][0].rsplit(".", 1)[0]
+        return f"{first}_ほか{len(results) - 1}件.pdf", "application/pdf", data, meta
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        used = set()
+        for n, d in results:
+            base, k = n, 2
+            while n in used:
+                n = base.rsplit(".", 1)[0] + "_" + str(k) + ".pdf"
+                k += 1
+            used.add(n)
+            archive.writestr(n, d)
+    return "PDF変換.zip", "application/zip", buffer.getvalue(), meta
+
+
+def _pdf_to_office(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    fmt = payload.get("fmt")
+    wanted = payload.get("pages")
+    page_list = [int(p) for p in wanted] if wanted else None
+    doc = pymupdf.open("pdf", entry.bytes())
+    try:
+        selected = page_list if page_list is not None else list(range(doc.page_count))
+        warnings = []
+        no_text = [p + 1 for p in selected if not doc[p].get_text().strip()]
+        if no_text:
+            warnings.append(f"文字情報のないページが {len(no_text)} ページあります（スキャン画像など）。文字として取り出すには、先に「ツール」→「文字認識（OCR）」をしてください")
+        if fmt == "docx":
+            from . import to_docx
+            data, w = to_docx.convert(doc, payload.get("mode") or "flow", page_list)
+            ext, media = "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fmt == "pptx":
+            from . import to_pptx
+            data, w = to_pptx.convert(doc, page_list)
+            ext, media = "pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        elif fmt == "xlsx":
+            from . import to_xlsx
+            data, w = to_xlsx.convert(doc, payload.get("mode") or "per_page", page_list, bool(payload.get("numbers", True)))
+            ext, media = "xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        else:
+            raise ApiError(400, "変換先の形式が不明です")
+        warnings += w
+    except ApiError:
+        raise
+    except MemoryError:
+        raise ApiError(507, "メモリが足りず変換できませんでした。ページ範囲を分けて試してください")
+    except Exception as exc:
+        raise ApiError(500, f"変換できませんでした: {exc}")
+    finally:
+        doc.close()
+    return f"{_stem(entry)}.{ext}", media, data, {"warnings": warnings}
+
+
 def _images(payload: dict):
     entry = _doc(payload)
     _sync(entry, payload)
     return pages.to_images(entry.doc, _stem(entry), payload.get("pages"),
-                           dpi=int(payload.get("dpi", 150)), fmt=payload.get("format", "png"))
+                           dpi=int(payload.get("dpi", 150)), fmt=payload.get("format", "png"),
+                           quality=int(payload.get("quality", 90)))
 
 
 def _text(payload: dict):
@@ -958,6 +1131,8 @@ _JSON_ROUTES = {
     "close": close_document,
     "undo": undo_structural,
     "from-images": from_images,
+    "files.merge": merge_files,
+    "pages.organize": organize,
     "compress": compress_document,
     "outline.set": outline_set,
     "outline.auto": outline_auto,
@@ -984,6 +1159,9 @@ _BINARY_ROUTES = {
     "images": _images,
     "text": _text,
     "pages.extract-ranges": _extract_ranges,
+    "images.extract": _extract_images,
+    "office.to-pdf": _office_to_pdf,
+    "pdf.to-office": _pdf_to_office,
 }
 
 
@@ -1017,13 +1195,12 @@ def dispatch(action: str, payload) -> dict:
             body = _JSON_ROUTES[action](payload)
             return {"status": 200, "json": body}
         if action in _BINARY_ROUTES:
-            filename, media_type, data = _BINARY_ROUTES[action](payload)
-            return {
-                "status": 200,
-                "filename": filename,
-                "mediaType": media_type,
-                "data": data,
-            }
+            result = _BINARY_ROUTES[action](payload)
+            filename, media_type, data = result[:3]
+            out = {"status": 200, "filename": filename, "mediaType": media_type, "data": data}
+            if len(result) > 3:
+                out["meta"] = result[3]
+            return out
         return {"status": 404, "json": {"detail": f"未対応の操作です: {action}"}}
     except ApiError as exc:
         return {"status": exc.status, "json": {"detail": exc.message}}

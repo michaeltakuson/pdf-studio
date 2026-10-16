@@ -56,6 +56,7 @@ _LINE_FACTORS = (
 
 _files: dict[str, str | None] = {}
 _fonts: dict[str, pymupdf.Font | None] = {}
+_font_data: dict[int, bytes] = {}      # id(Font) -> the font file, for embedding
 
 
 def _find(name: str) -> str | None:
@@ -75,15 +76,30 @@ def _load(name: str) -> pymupdf.Font | None:
     if name not in _fonts:
         path = _find(name)
         try:
-            _fonts[name] = pymupdf.Font(fontfile=path) if path else None
+            font = None
+            if path:
+                with open(path, "rb") as handle:
+                    raw = handle.read()
+                font = pymupdf.Font(fontbuffer=raw)
+                _font_data[id(font)] = raw
+            _fonts[name] = font
         except Exception:  # noqa: BLE001 - a bad font file must not stop a conversion
             _fonts[name] = None
     return _fonts[name]
 
 
+_serif_cache: dict = {}
+_factor_cache: dict = {}
+_SERIF_LOWER = tuple(w.lower() for w in _SERIF_WORDS)
+
+
 def is_serif(family: str | None) -> bool:
-    name = (family or "").lower()
-    return any(word.lower() in name for word in _SERIF_WORDS)
+    hit = _serif_cache.get(family)
+    if hit is None:
+        name = (family or "").lower()
+        hit = any(word in name for word in _SERIF_LOWER)
+        _serif_cache[family] = hit
+    return hit
 
 
 # PowerPoint keeps Yu Gothic / Yu Mincho much tighter than Word does.
@@ -91,6 +107,14 @@ _PPT_FACTORS = ((("游ゴシック", "yu gothic", "游明朝", "yu mincho", "yug
 
 
 def line_factor(family: str | None, app: str = "word") -> float:
+    key = (family, app)
+    hit = _factor_cache.get(key)
+    if hit is None:
+        hit = _factor_cache[key] = _line_factor(family, app)
+    return hit
+
+
+def _line_factor(family: str | None, app: str) -> float:
     name = (family or "").lower()
     if app == "ppt":
         for words, factor in _PPT_FACTORS:
@@ -105,7 +129,7 @@ def line_factor(family: str | None, app: str = "word") -> float:
 class Face:
     """One drawable face: a font plus how to fake what it lacks."""
 
-    __slots__ = ("key", "font", "fake_bold", "fake_italic", "adv", "ascent", "descent")
+    __slots__ = ("key", "font", "fake_bold", "fake_italic", "adv", "ascent", "descent", "_has", "_gid")
 
     def __init__(self, key: str, font: pymupdf.Font, fake_bold: bool, fake_italic: bool):
         self.key = key
@@ -113,11 +137,13 @@ class Face:
         self.fake_bold = fake_bold
         self.fake_italic = fake_italic
         self.adv: dict[str, tuple[float, float, float]] = {}
+        self._has: dict[str, bool] = {}
+        self._gid: dict[str, int] = {}
         self.ascent = font.ascender or 0.88
         self.descent = -(font.descender or -0.12)
 
     def has(self, ch: str) -> bool:
-        return bool(self.font.has_glyph(ord(ch)))
+        return self.gid(ch) > 0
 
     def metrics(self, ch: str) -> tuple[float, float, float]:
         """(layout advance, draw shift, natural advance) in em.
@@ -149,6 +175,29 @@ class Face:
 
     def advance(self, ch: str) -> float:
         return self.metrics(ch)[0]
+
+    def natural(self, ch: str) -> float:
+        return self.metrics(ch)[2]
+
+    def gid(self, ch: str) -> int:
+        hit = self._gid.get(ch)
+        if hit is None:
+            hit = self._gid[ch] = int(self.font.has_glyph(ord(ch)) or 0)
+        return hit
+
+    @property
+    def serif(self) -> bool:
+        return self.key.startswith("m")
+
+    def font_data(self) -> bytes:
+        data = _font_data.get(id(self.font))
+        if data is None:
+            try:
+                data = bytes(self.font.buffer)
+            except Exception:  # noqa: BLE001
+                data = b""
+            _font_data[id(self.font)] = data
+        return data
 
 
 _OPENING = set("（「『【〔〈《｛［〘〖〝‘“")
@@ -715,179 +764,8 @@ def _emit_run(sheet: Sheet, x: float, baseline: float, text: str, style: Style, 
 
 # ----------------------------------------------------------------------------- drawing into a PDF
 
-_ITALIC_SHEAR = 0.22
-
-
 def render(sheets: list[Sheet], doc: pymupdf.Document | None = None, subset: bool = True,
            fields: dict | None = None, anchors: dict | None = None) -> pymupdf.Document:
     """Draw display lists into ``doc`` (a new document by default)."""
-    doc = doc or pymupdf.open()
-    fields = fields or {}
-    for number, sheet in enumerate(sheets, start=1):
-        page = doc.new_page(width=sheet.width, height=sheet.height)
-        _render_page(page, sheet, {**fields, "PAGE": number, "NUMPAGES": len(sheets)}, anchors or {}, doc)
-    if subset:
-        try:
-            doc.subset_fonts()
-        except Exception:  # noqa: BLE001 - fontTools missing: the full faces stay embedded
-            pass
-    return doc
-
-
-def _paint(shape, fill, stroke, width, dash, closed=True):
-    shape.finish(fill=fill, color=stroke, width=width if stroke else 0, dashes=dash, closePath=closed,
-                 even_odd=False)
-
-
-def _render_page(page: pymupdf.Page, sheet: Sheet, fields: dict, anchors: dict, doc) -> None:
-    shape = page.new_shape()
-    writers: dict[tuple, tuple[pymupdf.TextWriter, Face, Style]] = {}
-    deferred_images = []
-    links = []
-    for op in sheet.below + sheet.ops:
-        kind = op[0]
-        if kind == "rect":
-            _, x0, y0, x1, y1, fill, stroke, width, dash, radius = op
-            if (x1 - x0 <= 0 and y1 - y0 <= 0) or (fill is None and stroke is None):
-                continue
-            rect = pymupdf.Rect(x0, y0, x1, y1)
-            if radius:
-                shape.draw_rect(rect, radius=radius)
-            else:
-                shape.draw_rect(rect)
-            _paint(shape, fill, stroke, width, dash)
-        elif kind == "line":
-            _, x0, y0, x1, y1, color, width, dash = op
-            shape.draw_line((x0, y0), (x1, y1))
-            shape.finish(color=color, width=width, dashes=dash, closePath=False)
-        elif kind == "poly":
-            _, points, fill, stroke, width, closed, dash = op
-            if len(points) >= 2 and not (fill is None and stroke is None):
-                shape.draw_polyline([pymupdf.Point(*p) for p in points])
-                _paint(shape, fill, stroke, width, dash, closed)
-        elif kind == "text":
-            _, x, y, text, style = op
-            _queue_text(writers, x, y, text, style, fields)
-        elif kind == "image":
-            deferred_images.append(op)
-        elif kind == "link":
-            links.append(op)
-    # vector shapes first, then pictures, then text on top
-    shape.commit()
-    for op in deferred_images:
-        _, x0, y0, x1, y1, data, clip = op
-        try:
-            rect = pymupdf.Rect(x0, y0, x1, y1)
-            if rect.width < 0.1 or rect.height < 0.1:
-                continue
-            if isinstance(data, tuple) and data and data[0] == "pdf":
-                _draw_pdf_image(page, rect, data[1])
-            else:
-                page.insert_image(rect, stream=data, keep_proportion=False)
-        except Exception:  # noqa: BLE001 - an unreadable picture is left out, not fatal
-            continue
-    for (color, _italic, _bold, _face), (writer, face, _style) in writers.items():
-        _write(writer, page, color, face)
-    for op in links:
-        _, x0, y0, x1, y1, target = op
-        rect = pymupdf.Rect(x0, y0, x1, y1)
-        try:
-            if target.startswith("uri:"):
-                page.insert_link({"kind": pymupdf.LINK_URI, "from": rect, "uri": target[4:]})
-            elif target.startswith("anchor:"):
-                dest = anchors.get(target[7:])
-                if dest is not None:
-                    page.insert_link({"kind": pymupdf.LINK_GOTO, "from": rect, "page": dest[0],
-                                      "to": pymupdf.Point(0, dest[1])})
-        except Exception:  # noqa: BLE001
-            continue
-
-
-def _draw_pdf_image(page, rect, pdf_bytes):
-    src = pymupdf.open("pdf", pdf_bytes)
-    page.show_pdf_page(rect, src, 0)
-    src.close()
-
-
-def _queue_text(writers, x, y, text, style: Style, fields: dict):
-    if "{" in text:
-        for name, value in fields.items():
-            text = text.replace("{" + name + "}", str(value))
-    size = style.effective_size()
-    base = style.face()
-    spacing = style.spacing
-    cx = x
-    chunk = ""
-    chunk_face = None
-    chunk_x = x
-
-    def put(face, txt, px):
-        key = (style.color, base.fake_italic, base.fake_bold, face.key)
-        if key not in writers:
-            writers[key] = (_Writer(), face, style)
-        writers[key][0].add(px, y, txt, face, size, spacing)
-
-    for ch in text:
-        face = base if base.has(ch) else fallback_face(base, ch)
-        layout, shift, natural = face.metrics(ch)
-        exact = abs(layout - natural) < 0.004 and shift == 0.0 and not spacing
-        if exact and face is chunk_face:
-            chunk += ch
-        else:
-            if chunk:
-                put(chunk_face, chunk, chunk_x)
-                chunk = ""
-            if exact:
-                chunk, chunk_face, chunk_x = ch, face, cx
-            else:
-                put(face, ch, cx + shift * size)
-                chunk_face = None
-        cx += layout * size + spacing
-    if chunk:
-        put(chunk_face, chunk, chunk_x)
-
-
-class _Writer:
-    """Collects text for one (colour, faux style, face) combination on a page."""
-
-    def __init__(self):
-        self.items: list[tuple] = []
-
-    def add(self, x, y, text, face, size, spacing):
-        self.items.append((x, y, text, face, size, spacing))
-
-
-def _write(writer: _Writer, page: pymupdf.Page, color, face: Face) -> None:
-    if not writer.items:
-        return
-    tw = pymupdf.TextWriter(page.rect)
-    shear_items = []
-    for x, y, text, face_, size, spacing in writer.items:
-        if face_.fake_italic:
-            shear_items.append((x, y, text, face_, size, spacing))
-            continue
-        _append(tw, x, y, text, face_, size, spacing)
-    tw.write_text(page, color=color)
-    if face.fake_bold and writer.items:
-        size = writer.items[0][4]
-        tw.write_text(page, color=color, matrix=pymupdf.Matrix(1, 0, 0, 1, max(0.2, size * 0.025), 0))
-    for x, y, text, face_, size, spacing in shear_items:
-        tw2 = pymupdf.TextWriter(page.rect)
-        _append(tw2, x, y, text, face_, size, spacing)
-        morph = (pymupdf.Point(x, y), pymupdf.Matrix(1, 0, _ITALIC_SHEAR, 1, 0, 0))
-        tw2.write_text(page, color=color, morph=morph)
-        if face_.fake_bold:
-            tw2.write_text(page, color=color, morph=morph,
-                           matrix=pymupdf.Matrix(1, 0, 0, 1, max(0.2, size * 0.025), 0))
-
-
-def _append(tw: pymupdf.TextWriter, x, y, text, face: Face, size, spacing) -> None:
-    if not text:
-        return
-    if spacing:
-        cx = x
-        for ch in text:
-            tw.append((cx, y), ch, font=face.font, fontsize=size)
-            cx += face.advance(ch) * size + spacing
-    else:
-        tw.append((x, y), text, font=face.font, fontsize=size)
+    from .rawpdf import render_sheets
+    return render_sheets(sheets, doc, subset, fields or {}, anchors or {})

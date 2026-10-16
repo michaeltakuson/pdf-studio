@@ -85,6 +85,8 @@ function resultToResponse(result) {
   if (result.filename) {
     headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.filename)}`);
   }
+  // Small extra facts about a produced file (warnings, counts) travel in a header, as JSON.
+  if (result.meta) headers.set('X-Pdfstudio-Meta', encodeURIComponent(JSON.stringify(result.meta)));
   if (result.data !== undefined && result.data !== null) {
     headers.set('Content-Type', result.mediaType || 'application/octet-stream');
     const bytes = result.data instanceof Uint8Array ? result.data : new Uint8Array(result.data);
@@ -117,6 +119,14 @@ async function readPayload(init, extra) {
     if (file) { out.name = file.name; out.data = await fileBytes(file); }
     const password = body.get('password');
     if (password != null) out.password = password;
+    // every other text field rides along (options), and 'meta' is a per-file list (page ranges...)
+    for (const [key, value] of body.entries()) {
+      if (typeof value !== 'string' || key === 'password') continue;
+      if (key === 'meta' || key === 'items' || key === 'annots') { try { out[key] = JSON.parse(value); } catch { /* ignore */ } continue; }
+      out[key] = value;
+    }
+    if (Array.isArray(out.meta) && out.files) out.files.forEach((f, i) => Object.assign(f, out.meta[i] || {}));
+    if (out.fonts) { try { out.fonts = JSON.parse(out.fonts); } catch { delete out.fonts; } }
     return out;
   }
   return { ...extra };
@@ -149,6 +159,12 @@ async function route(url, init) {
   if (parts[0] === 'from-images' && method === 'POST') {
     return { action: 'from-images', payload: await readPayload(init) };
   }
+  if (parts[0] === 'merge-files' && method === 'POST') {
+    return { action: 'files.merge', payload: await readPayload(init) };
+  }
+  if (parts[0] === 'office-to-pdf' && method === 'POST') {
+    return { action: 'office.to-pdf', payload: await readPayload(init) };
+  }
   if (parts[0] !== 'doc' || parts.length < 2) return null;
 
   let docId = parts[1];
@@ -174,7 +190,11 @@ async function route(url, init) {
     undo: 'undo', compress: 'compress', nup: 'nup', split: 'split', images: 'images',
     'extract-ranges': 'pages.extract-ranges', 'ocr-apply': 'ocr.apply',
     outline: 'outline.set', metadata: 'metadata.set', snapshot: 'snapshot', 'outline-auto': 'outline.auto', 'fit-paper': 'fit-paper',
+    'extract-images': 'images.extract', 'to-office': 'pdf.to-office',
   };
+  if (rest[0] === 'organize' && method === 'POST') {
+    return { action: 'pages.organize', payload: await readPayload(init, base) };
+  }
   if (rest.length === 1 && SIMPLE[rest[0]] && method === 'POST') {
     return { action: SIMPLE[rest[0]], payload: await readPayload(init, base) };
   }

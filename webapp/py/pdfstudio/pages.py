@@ -202,7 +202,7 @@ def split(doc: pymupdf.Document, stem: str, *, ranges: str = "", every: int = 0)
 
 
 def to_images(doc: pymupdf.Document, stem: str, pages: list[int] | None, *,
-              dpi: int = 150, fmt: str = "png") -> tuple[str, str, bytes]:
+              dpi: int = 150, fmt: str = "png", quality: int = 90) -> tuple[str, str, bytes]:
     """Render pages (markup included) to pictures. One page comes back as the
     picture itself, several as a zip."""
     import io
@@ -214,7 +214,7 @@ def to_images(doc: pymupdf.Document, stem: str, pages: list[int] | None, *,
 
     def render(index: int) -> bytes:
         pix = doc[index].get_pixmap(dpi=int(dpi), alpha=False)
-        return pix.tobytes("jpeg", jpg_quality=90) if fmt == "jpg" else pix.tobytes("png")
+        return pix.tobytes("jpeg", jpg_quality=int(quality)) if fmt == "jpg" else pix.tobytes("png")
 
     if len(targets) == 1:
         return f"{stem}_p{targets[0] + 1}.{fmt}", media, render(targets[0])

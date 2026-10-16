@@ -19,6 +19,8 @@ import { TextEditor, fitRect, ensureFontLoaded, canBold, LINE_HEIGHT } from './t
 import { MARKUP_TOOLS, ONE_SHOT, translated } from './tools.js';
 import { signatureDialog, hankoDialog, cropDialog, normaliseImage, loadImage, fileToDataUrl } from './stamps.js';
 import * as ops from './docops.js';
+import * as convert from './convert.js';
+import { openOrganizer } from './organizer.js';
 import { keyFor, saveDraft, loadDraft, clearDraft, pruneDrafts } from './drafts.js';
 import { rememberFile, recentFiles, forgetFile, SNIPPET_FIELDS, loadSnippets, saveSnippets } from './recent.js';
 
@@ -226,6 +228,7 @@ document.addEventListener('pdfstudio:failed', (e) => {
 });
 
 async function openFile(file, password = '', handle = null, { keepPosition = false } = {}) {
+  if (convert.isOffice(file)) { convert.openOfficeFile(file); return; }
   if (!window.pdfStudioReady && !password) { previewFile(file, handle); return; }
   if (!password && !(await confirmDiscard())) return;
   state.preview = null;
@@ -278,7 +281,14 @@ async function chooseFile() {
   if (!window.showOpenFilePicker) { $('#fileInput').click(); return; }
   try {
     const [handle] = await window.showOpenFilePicker({
-      types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+      types: [
+        { description: 'PDF', accept: { 'application/pdf': ['.pdf'] } },
+        { description: 'Word・PowerPoint・Excel（PDFに変換して開きます）', accept: {
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+        } },
+      ],
     });
     await openFile(await handle.getFile(), '', handle);
   } catch (err) {
@@ -308,22 +318,46 @@ async function newBlank() {
   refreshPanels();
 }
 
-async function pdfFromImages(files) {
-  if (!files.length) return;
-  if (!(await confirmDiscard())) return;
-  const done = busy('画像からPDFを作っています…');
-  try {
-    await paint();
-    const form = new FormData();
-    for (const file of files) form.append('files', file);
-    const response = await fetch('/api/from-images', { method: 'POST', body: form });
-    if (!response.ok) { toast(`作成できませんでした: ${await errorDetail(response)}`, 'error'); return; }
-    state.unsaved = false;
-    await adopt(await response.json(), { message: `${files.length} 枚の画像からPDFを作りました` });
-    state.unsaved = true;
-    refreshPanels();
-  } finally {
-    done();
+
+// ================================================================ tools on the start screen
+
+/** Open a PDF first (the picker), then carry on with an operation that needs one. */
+async function openThen(run) {
+  await chooseFile();
+  if (hasDoc()) run();
+}
+
+/** Word / PowerPoint / Excel in and out, and the file tools: the same things the 変換 tab holds, within reach of the first screen. */
+function renderToolCards() {
+  const holder = $('#toolCards');
+  if (!holder) return;
+  const groups = [
+    { title: 'PDFにする', cards: [
+      ['word', 'Word → PDF', () => convert.officeToPdf('word')],
+      ['powerpoint', 'PowerPoint → PDF', () => convert.officeToPdf('powerpoint')],
+      ['excel', 'Excel → PDF', () => convert.officeToPdf('excel')],
+      ['image', '画像 → PDF', () => convert.imagesToPdf()],
+    ] },
+    { title: 'PDFから', cards: [
+      ['word', 'PDF → Word', () => convert.pdfToOffice('docx')],
+      ['powerpoint', 'PDF → PowerPoint', () => convert.pdfToOffice('pptx')],
+      ['excel', 'PDF → Excel', () => convert.pdfToOffice('xlsx')],
+      ['image', 'PDF → 画像', () => openThen(ops.exportImages)],
+    ] },
+    { title: 'まとめる・整える', cards: [
+      ['merge', 'PDFを結合', () => convert.mergePdfs()],
+      ['split', 'PDFを分割', () => openThen(ops.splitDocument)],
+      ['compress', 'PDFを圧縮', () => openThen(ops.compressDocument)],
+      ['organize', 'ページを整理', () => openThen(() => openOrganizer())],
+    ] },
+  ];
+  holder.textContent = '';
+  for (const group of groups) {
+    const grid = h('div', { class: 'tool-grid' });
+    for (const [icon, label, run] of group.cards) {
+      grid.append(h('button', { class: 'tool-card', type: 'button', html: iconSvg(icon, 26), onclick: run }, [h('span', { text: label })]));
+    }
+    holder.append(h('div', { class: 'tool-group' }, [h('h2', { text: group.title }), grid]));
   }
 }
 
@@ -364,7 +398,7 @@ $('#fileInput').addEventListener('change', (e) => {
   if (e.target.files[0]) openFile(e.target.files[0]);
   e.target.value = '';
 });
-$('#imagePdfInput').addEventListener('change', (e) => { pdfFromImages([...e.target.files]); e.target.value = ''; });
+$('#imagePdfInput').addEventListener('change', (e) => { convert.imagesToPdf([...e.target.files]); e.target.value = ''; });
 $('#imageInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
@@ -377,7 +411,7 @@ $('#collateInput').addEventListener('change', (e) => { ops.collateFields([...e.t
 $('#compareInput').addEventListener('change', (e) => { ops.compareWith(e.target.files[0]); e.target.value = ''; });
 $('#btnOpen2').addEventListener('click', chooseFile);
 $('#btnNew2').addEventListener('click', newBlank);
-$('#btnImages2').addEventListener('click', () => $('#imagePdfInput').click());
+$('#btnImages2').addEventListener('click', () => convert.imagesToPdf());
 
 // Files can be dropped anywhere on the window. Handling it only over the page
 // area meant a drop on a toolbar made the browser navigate away to the file.
@@ -402,6 +436,12 @@ window.addEventListener('drop', async (e) => {
   const isPdf = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
   const pdfs = files.filter(isPdf);
   const images = files.filter((f) => f.type.startsWith('image/'));
+  const offices = files.filter(convert.isOffice);
+  if (offices.length && !pdfs.length) {
+    // Word / PowerPoint / Excel: one opens as a PDF at once; several are offered as a batch
+    if (offices.length === 1) convert.openOfficeFile(offices[0]); else convert.officeToPdf('any', offices);
+    return;
+  }
   if (pdfs.length) {
     if (hasDoc() && (pdfs.length > 1 || e.shiftKey)) { ops.mergeFiles(pdfs); return; }
     const handle = handlePromise ? await handlePromise : null;
@@ -412,10 +452,12 @@ window.addEventListener('drop', async (e) => {
       const at = view ? { view, point: viewer.toPageCoords(view, e) } : null;
       for (const image of images) await insertImage(await fileToDataUrl(image), { at });
     } else {
-      pdfFromImages(images);
+      convert.imagesToPdf(images);
     }
   } else if (files.length) {
-    toast('PDFか画像ファイルをドロップしてください', 'warn');
+    toast(files.some((f) => convert.kindOf(f) === 'legacy')
+      ? '古い形式（.doc .ppt .xls）は読み込めません。Office で .docx / .pptx / .xlsx として保存し直してください'
+      : 'PDF・画像・Word・PowerPoint・Excel のファイルをドロップしてください', 'warn');
   }
 });
 
@@ -665,6 +707,10 @@ function afterReload() {
 hooks.refreshAll = refreshAll;
 hooks.afterReload = afterReload;
 hooks.flushEditing = () => flushEditing();
+hooks.adopt = (data, options) => adopt(data, options);
+hooks.openFile = (file) => openFile(file);
+hooks.confirmDiscard = () => confirmDiscard();
+hooks.runOcr = () => runOcr();
 
 // A burst of typing is one undo step; a pause starts the next.
 let mergeIdleTimer;
@@ -2711,6 +2757,17 @@ viewer.setSpread(getPref('spread')); ribbon.refresh(); }, active: () => !!getPre
   ocr: { label: '文字認識', icon: 'ocr', short: '文字認識\n(OCR)', title: 'スキャンした文書を文字認識して、検索・選択できるようにする', run: runOcr, ...needsDoc },
   protect: { label: 'パスワード保護', icon: 'lock', title: 'パスワードを付けて書き出す', run: ops.protectDocument, ...needsDoc },
   compress: { label: '圧縮', icon: 'compress', title: 'ファイルを圧縮（ファイルサイズを小さくする）', run: ops.compressDocument, ...needsDoc },
+  // converting (Word / PowerPoint / Excel / pictures, in and out) and putting PDFs together
+  fromWord: { label: 'Word', icon: 'word', title: 'Word（.docx）をPDFにする', run: () => convert.officeToPdf('word') },
+  fromPpt: { label: 'PowerPoint', icon: 'powerpoint', short: 'Power\nPoint', title: 'PowerPoint（.pptx）をPDFにする', run: () => convert.officeToPdf('powerpoint') },
+  fromExcel: { label: 'Excel', icon: 'excel', title: 'Excel（.xlsx）をPDFにする', run: () => convert.officeToPdf('excel') },
+  fromImages: { label: '画像', icon: 'image', title: '画像（JPEG・PNGなど）をPDFにする', run: () => convert.imagesToPdf() },
+  toWord: { label: 'Word', icon: 'word', title: 'PDFをWord（.docx）にする', run: () => convert.pdfToOffice('docx') },
+  toPpt: { label: 'PowerPoint', icon: 'powerpoint', short: 'Power\nPoint', title: 'PDFをPowerPoint（.pptx）にする', run: () => convert.pdfToOffice('pptx') },
+  toExcel: { label: 'Excel', icon: 'excel', title: 'PDFをExcel（.xlsx）にする', run: () => convert.pdfToOffice('xlsx') },
+  extractimg: { label: '画像を取り出す', icon: 'extractimg', short: '画像を\n取り出す', title: 'PDFに入っている写真や図を、元の画質のまま取り出す', run: convert.extractImages, ...needsDoc },
+  mergeNew: { label: 'PDFを結合', icon: 'merge', short: 'PDFを\n結合', title: '複数のPDFを順番に並べて1つにまとめる', run: () => convert.mergePdfs() },
+  organize: { label: 'ページを整理', icon: 'organize', short: 'ページを\n整理', title: 'ページを一覧で見ながら、並べ替え・回転・削除・追加をまとめて行う', run: () => openOrganizer(), ...needsDoc },
   a11y: { label: 'チェック', icon: 'accessibility', title: 'アクセシビリティ チェック（読み上げソフトで読める文書かを確かめる）', run: ops.runAccessibilityAudit, ...needsDoc },
   readorder: { label: '読み上げ順', icon: 'order', title: '読み上げ順序を確認する', run: ops.showReadingOrder, ...needsDoc },
   sigfield: { label: '電子署名欄', icon: 'signature', menu: true, ...needsDoc,
@@ -2760,12 +2817,17 @@ const tabs = [
   { id: 'pages', label: 'ページ', groups: [
     { label: '回転', items: [{ big: 'rotatecw' }, { col: ['rotateccw', 'rotateall'] }] },
     { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }] },
-    { label: '結合・分割', items: [{ big: 'merge' }, { col: ['extract', 'split'] }] },
+    { label: '結合・分割', items: [{ big: 'merge' }, { col: ['extract', 'split'] }, { big: 'organize' }] },
     { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'headerfooter'] }, { col: ['crop', 'uncrop', 'fitpaper'] }] },
     { label: '対象', items: [custom(() => h('div', { class: 'rhint', text: hasDoc()
       ? `対象: ${describePages(targetPages())}。左のページ一覧で Ctrl / Shift を押しながら選ぶと、複数ページをまとめて操作できます。`
       : 'PDFを開くと、ページの回転・削除・並べ替え・結合ができます。' }),
     () => (hasDoc() ? describePages(targetPages()) : ''))] },
+  ] },
+  { id: 'convert', label: '変換', groups: [
+    { label: 'PDFにする', items: [{ big: 'fromWord' }, { big: 'fromPpt' }, { big: 'fromExcel' }, { big: 'fromImages' }] },
+    { label: 'PDFから', items: [{ big: 'toWord' }, { big: 'toPpt' }, { big: 'toExcel' }, { big: 'toimages' }, { big: 'extractimg' }] },
+    { label: 'まとめる・整える', items: [{ big: 'mergeNew' }, { big: 'organize' }, { big: 'split' }, { big: 'compress' }] },
   ] },
   { id: 'review', label: '校閲', groups: [
     { label: 'コメント', items: [{ big: 'comments' }, { col: ['note', 'callout', 'annotexport'] }] },
@@ -2796,7 +2858,9 @@ function fileMenu(anchor) {
   openMenu(anchor, [
     { label: '開く…', icon: 'open', key: 'Ctrl+O', action: chooseFile },
     { label: '白紙から作る…', icon: 'newdoc', action: newBlank },
-    { label: '画像からPDFを作る…', icon: 'image', action: () => $('#imagePdfInput').click() },
+    { label: '画像からPDFを作る…', icon: 'image', action: () => convert.imagesToPdf() },
+    { label: 'Word・PowerPoint・Excel をPDFにする…', icon: 'topdf', action: () => convert.officeToPdf('any') },
+    { label: '複数のPDFを結合して新しく作る…', icon: 'merge', action: () => convert.mergePdfs() },
     '-',
     { label: '上書き保存', icon: 'save', key: 'Ctrl+S', disabled: !open, action: () => saveToDisk() },
     { label: '名前を付けて保存…', icon: 'saveas', key: 'Ctrl+Shift+S', disabled: !open, action: () => saveToDisk({ saveAs: true }) },
@@ -2807,6 +2871,10 @@ function fileMenu(anchor) {
     '-',
     { heading: '書き出す' },
     { label: 'ページを画像にする（PNG / JPEG）…', icon: 'image', disabled: !open, action: ops.exportImages },
+    { label: 'Word にする（.docx）…', icon: 'word', action: () => convert.pdfToOffice('docx') },
+    { label: 'PowerPoint にする（.pptx）…', icon: 'powerpoint', action: () => convert.pdfToOffice('pptx') },
+    { label: 'Excel にする（.xlsx）…', icon: 'excel', action: () => convert.pdfToOffice('xlsx') },
+    { label: 'PDFに入っている画像を取り出す…', icon: 'extractimg', disabled: !open, action: convert.extractImages },
     { label: '文字だけを取り出す（テキストファイル）', icon: 'text2', disabled: !open, action: ops.exportText },
     { label: '配布資料にする（複数ページを1枚に）…', icon: 'nup', disabled: !open, action: ops.handout },
     { label: 'パスワードを付けて書き出す…', icon: 'lock', disabled: !open, action: ops.protectDocument },
@@ -2976,6 +3044,7 @@ refreshAll();
 status('準備完了 — PDFを開いてください');
 pruneDrafts();
 showRecent();
+renderToolCards();
 
 // Installed as an app, PDF Studio can be chosen under "Open with" for a PDF;
 // the file arrives here, with a handle that lets Save write straight back.

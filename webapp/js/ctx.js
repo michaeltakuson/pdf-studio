@@ -34,6 +34,10 @@ export const hooks = {
   refreshAll: () => {},
   afterReload: () => {},
   flushEditing: () => {},
+  adopt: async () => {},          // show a document the engine has just created
+  openFile: async () => {},       // open a File through the ordinary path
+  confirmDiscard: async () => true,
+  runOcr: async () => {},
 };
 
 // ---------------------------------------------------------------- feedback
@@ -157,10 +161,17 @@ export function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+/** Small extra facts the engine sends along with a file (warnings, counts). */
+export function metaOf(response) {
+  try { return JSON.parse(decodeURIComponent(response.headers.get('X-Pdfstudio-Meta') || '{}')); } catch { return {}; }
+}
+
 export async function downloadResponse(response, fallback) {
   const name = fileNameOf(response, fallback);
   downloadBlob(await response.blob(), name);
-  toast(`${name} を書き出しました`);
+  const warnings = metaOf(response).warnings || [];
+  toast(warnings.length ? `${name} を書き出しました（注意: ${warnings[0]}）` : `${name} を書き出しました`, warnings.length ? 'warn' : '');
+  return { name, warnings };
 }
 
 /** POST, then hand whatever comes back to the browser as a download. */
@@ -171,8 +182,7 @@ export async function exportVia(path, body, { label = '書き出し', fallback =
     await paint();
     const response = await post(path, body, { withAnnots });
     if (!response.ok) { toast(`${label}に失敗しました: ${await errorDetail(response)}`, 'error'); return false; }
-    await downloadResponse(response, fallback);
-    return true;
+    return (await downloadResponse(response, fallback)) || true;
   } catch (err) {
     toast(`${label}に失敗しました: ${err.message}`, 'error');
     return false;

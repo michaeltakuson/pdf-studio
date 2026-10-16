@@ -101,6 +101,7 @@
           <button id="btnImages2" class="btn large">画像からPDFを作る</button>
         </div>
         <div id="recentFiles" class="recent" hidden></div>
+        <div id="toolCards" class="tool-cards"></div>
         <ul class="hints">
           <li><b>文字を書き込む</b>　「テキスト追加」を選んで、書きたい場所をクリックしてそのまま入力</li>
           <li><b>書いた文字を直す</b>　文字をクリックするだけで、その場で編集できます</li>
@@ -156,7 +157,7 @@
   </div>
 </footer>
 
-<input type="file" id="fileInput" accept="application/pdf,.pdf" hidden>
+<input type="file" id="fileInput" accept="application/pdf,.pdf,.docx,.pptx,.xlsx" hidden>
 <input type="file" id="imagePdfInput" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" multiple hidden>
 <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml" hidden>
 <input type="file" id="xfdfInput" accept=".xfdf,.xml" hidden>

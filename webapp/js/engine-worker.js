@@ -15,7 +15,11 @@ const PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`
 const WHEEL_NAME = 'pymupdf-1.28.2-cp313-abi3-pyodide_2025_0_wasm32.whl';
 const PY_MODULES = [
   '__init__', 'common', 'textap', 'annots', 'content', 'pages', 'export',
-  'forms', 'measure', 'compare', 'signing', 'accessibility', 'session', 'bridge',
+  'forms', 'measure', 'compare', 'signing', 'accessibility',
+  // converting between PDF and Word / PowerPoint / Excel
+  'typeset', 'rawpdf', 'ooxml', 'numfmt', 'shapes', 'drawingml', 'charts', 'pdf_analyze',
+  'from_docx', 'from_pptx', 'from_xlsx', 'to_docx', 'to_pptx', 'to_xlsx', 'convert',
+  'session', 'bridge',
 ];
 const BASE = new URL('../', self.location.href);
 
@@ -125,7 +129,7 @@ self.addEventListener('message', (event) => {
     let result;
     try {
       await ready;
-      if (Array.isArray(payload?.annots)) await ensureFonts(payload.fonts);
+      if (Array.isArray(payload?.annots) || Array.isArray(payload?.fonts)) await ensureFonts(payload.fonts);
       result = call(action, payload);
     } catch (err) {
       result = { status: 500, json: { detail: String(err?.message || err) } };

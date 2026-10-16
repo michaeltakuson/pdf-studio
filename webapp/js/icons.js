@@ -139,6 +139,15 @@ const P = {
   spread: '<rect x="3" y="5" width="8" height="14" rx="1"/><rect x="13" y="5" width="8" height="14" rx="1"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.500 11a6.500 6.500 0 0 0 13 0M12 17.500V21M8.500 21h7"/>',
   text2: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
+  // converting files
+  grip: '<circle cx="9" cy="6" r="1.1" fill="currentColor"/><circle cx="15" cy="6" r="1.1" fill="currentColor"/><circle cx="9" cy="12" r="1.1" fill="currentColor"/><circle cx="15" cy="12" r="1.1" fill="currentColor"/><circle cx="9" cy="18" r="1.1" fill="currentColor"/><circle cx="15" cy="18" r="1.1" fill="currentColor"/>',
+  pdffile: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M8.500 13h7M8.500 17h4.500"/>',
+  word: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/><path d="m7.800 11.500 1.500 6 2.700-5 2.700 5 1.500-6" stroke-width="1.500"/>',
+  powerpoint: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/><path d="M9.500 18v-7h3a2.200 2.200 0 0 1 0 4.400h-3" stroke-width="1.500"/>',
+  excel: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/><path d="m9 11.500 6 6.500M15 11.500 9 18" stroke-width="1.500"/>',
+  organize: '<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><path d="M13 16.500h7M16.500 13v7"/>',
+  extractimg: '<rect x="3" y="4" width="13" height="11" rx="1.500"/><circle cx="7.500" cy="8" r="1.300"/><path d="m4 13 4-3.500 3 2.500 2.500-2L16 13"/><path d="M18 14v7M15 18l3 3 3-3"/>',
+  topdf: '<path d="M5 3h9l5 5v13H5z"/><path d="M14 3v5h5M8 14h8M8 18h5"/><path d="M3 11h6M6.500 8.500 9 11l-2.500 2.500" stroke-width="1.700"/>',
 };
 
 /** An icon as an SVG string. */

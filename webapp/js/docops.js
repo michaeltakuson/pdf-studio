@@ -113,18 +113,32 @@ export async function splitDocument() {
   const count = model.store.pages.length;
   const values = await formDialog({
     title: 'PDFを分割する',
-    intro: '分けたPDFをまとめて1つのZIPで書き出します。開いている文書は変わりません。',
+    intro: '開いている文書は変わりません。分けたPDFは、1つのZIPにまとめて書き出します（「範囲を1つのPDFにまとめる」のときはPDFそのものを書き出します）。',
     fields: [
-      { key: 'mode', label: '分け方', type: 'select', options: { every: '決まったページ数ごと', ranges: 'ページ範囲を指定' } },
-      { key: 'every', label: '何ページごと', type: 'number', value: 1, min: 1, max: Math.max(1, count) },
-      { key: 'ranges', label: 'ページ範囲', placeholder: '例: 1-3, 4-10, 11-', hint: 'カンマ区切りの1つ1つが別のPDFになります' },
+      { key: 'mode', label: '分け方', type: 'select', options: {
+        every: '決まったページ数ごと', ranges: 'ページ範囲を指定', size: 'ファイルサイズごと（メール添付の上限などに）',
+      } },
+      { key: 'every', label: '何ページごと', type: 'number', value: 1, min: 1, max: Math.max(1, count), hint: '「決まったページ数ごと」を選んだとき' },
+      { key: 'ranges', label: 'ページ範囲', placeholder: '例: 1-3, 4-10, 11-', hint: '「ページ範囲を指定」のとき。カンマ区切りの1つ1つが別のPDFになります' },
+      { key: 'single', label: '範囲を1つのPDFにまとめる', type: 'checkbox', hint: '指定したページだけを、1つのPDFにします（分割ではなく、抜き出し）' },
+      { key: 'sizeMB', label: '1ファイルの上限（MB）', type: 'number', value: 10, min: 0.1, step: 0.5, hint: '「ファイルサイズごと」のとき。1ページがこれより大きいときは、そのページだけで1ファイルになります' },
     ],
-    validate: (v) => (v.mode === 'ranges' && !v.ranges.trim() ? 'ページ範囲を入力してください' : null),
-    confirmLabel: '分割して書き出す',
+    validate: (v) => {
+      if (v.mode === 'ranges' && !v.ranges.trim()) return 'ページ範囲を入力してください';
+      if (v.mode === 'size' && !(v.sizeMB > 0)) return '上限のサイズ（MB）を入力してください';
+      if (v.single && v.mode !== 'ranges') return '「範囲を1つのPDFにまとめる」は、分け方を「ページ範囲を指定」にしたときに使います';
+      return null;
+    },
+    confirmLabel: '書き出す',
   });
   if (!values) return;
-  await exportVia('/split', values.mode === 'every' ? { every: values.every } : { ranges: values.ranges },
-    { label: '分割', fallback: 'split.zip' });
+  let body;
+  let fallback = 'split.zip';
+  if (values.mode === 'every') body = { every: values.every };
+  else if (values.mode === 'size') body = { sizeMB: values.sizeMB };
+  else if (values.single) { body = { ranges: values.ranges, single: true }; fallback = 'extract.pdf'; }
+  else body = { ranges: values.ranges };
+  await exportVia('/split', body, { label: '分割', fallback });
 }
 
 export async function addMargins() {
@@ -184,12 +198,14 @@ export async function exportImages() {
       { key: 'scope', label: '対象', type: 'select', options: { picked: describePages(pages), all: `すべてのページ（${model.store.pages.length}）` } },
       { key: 'format', label: '形式', type: 'select', options: { png: 'PNG（くっきり）', jpg: 'JPEG（軽い）' } },
       { key: 'dpi', label: '解像度', type: 'select', value: '150', options: { 96: '96 dpi（画面用）', 150: '150 dpi（標準）', 200: '200 dpi', 300: '300 dpi（印刷用）' } },
+      { key: 'quality', label: 'JPEGの画質', type: 'select', value: '85', options: { 70: '標準（軽い）', 85: '高画質', 95: '最高画質' }, hint: 'JPEGを選んだときに使います' },
     ],
     confirmLabel: '書き出す',
   });
   if (!values) return;
-  await exportVia('/images', { pages: values.scope === 'all' ? null : pages, format: values.format, dpi: Number(values.dpi) },
-    { label: '画像の書き出し', fallback: 'pages.zip' });
+  await exportVia('/images', {
+    pages: values.scope === 'all' ? null : pages, format: values.format, dpi: Number(values.dpi), quality: Number(values.quality),
+  }, { label: '画像の書き出し', fallback: 'pages.zip' });
 }
 
 export async function exportText() {
