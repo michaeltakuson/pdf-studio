@@ -18,7 +18,7 @@ const PY_MODULES = [
   'forms', 'measure', 'compare', 'signing', 'accessibility',
   // converting between PDF and Word / PowerPoint / Excel
   'typeset', 'rawpdf', 'ooxml', 'numfmt', 'shapes', 'drawingml', 'charts', 'pdf_analyze',
-  'from_docx', 'from_pptx', 'from_xlsx', 'to_docx', 'to_pptx', 'to_xlsx', 'convert',
+  'from_docx', 'from_pptx', 'from_xlsx', 'to_docx', 'to_pptx', 'to_xlsx', 'convert', 'extras',
   'session', 'bridge',
 ];
 const BASE = new URL('../', self.location.href);

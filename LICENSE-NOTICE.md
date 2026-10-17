@@ -41,6 +41,7 @@ AGPL の義務が生じるのは、他人に配布したときとネットワー
 | Zen Maru Gothic | SIL Open Font License 1.1 | 同上。© The Zen Maru Gothic Project Authors |
 | Klee One | SIL Open Font License 1.1 | 同上。© The Klee Project Authors（フォントワークス） |
 | Yomogi | SIL Open Font License 1.1 | 同上。© The Yomogi Project Authors |
+| qrcode-generator 1.4.4 | MIT | `webapp/vendor/qrcode-generator-1.4.4/`。© Kazuhiko Arase。QRコードの挿入に使用。`LICENSE` を削除しないでください。「QRコード」はデンソーウェーブの登録商標です |
 | Pyodide | MPL-2.0 | 同梱していない。起動時に CDN（jsDelivr）から読み込む |
 | fontTools | MIT | 同梱していない。文字を保存するときに Pyodide のパッケージとして読み込む |
 | tesseract.js と言語データ | Apache-2.0 | 同梱していない。文字認識（OCR）を初めて使うときに CDN から読み込む |

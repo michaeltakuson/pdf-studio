@@ -166,11 +166,43 @@ def body_font(serif: bool = False, bold: bool = False) -> pymupdf.Font:
 
 
 def subset(doc: pymupdf.Document) -> None:
-    """Shrink fonts embedded whole by the text writer down to what is used."""
+    """Note that fonts were embedded whole and should be cut down to what is used.
+
+    The cutting happens once, on a copy, when the file is written out
+    (``finish_fonts``). Doing it in place after every operation broke text
+    added later: PyMuPDF 1.28 merges a newly embedded face into the earlier
+    subset of the same face, so the glyphs of the second stamp (a watermark
+    after page numbers, say) were missing from the file.
+    """
+    doc._pdfstudio_subset = True
+
+
+def compact_bytes(doc: pymupdf.Document) -> bytes:
+    """The document written out from scratch, as small as a plain save allows.
+
+    Object streams pack the many small objects of a PDF together; without
+    them, saving a PowerPoint export made it a quarter larger than it came in.
+    """
     try:
-        doc.subset_fonts()
-    except Exception:
-        pass
+        return doc.tobytes(garbage=3, deflate=True, use_objstms=1)
+    except TypeError:  # a PyMuPDF without object streams
+        return doc.tobytes(garbage=3, deflate=True)
+
+
+def subset_pending(doc: pymupdf.Document) -> bool:
+    return bool(getattr(doc, "_pdfstudio_subset", False))
+
+
+def finish_fonts(data: bytes) -> bytes:
+    """The file with its whole embedded faces cut down to the glyphs used."""
+    copy = pymupdf.open("pdf", data)
+    try:
+        copy.subset_fonts()
+        return compact_bytes(copy)
+    except Exception:  # noqa: BLE001 - a file with whole faces is still a correct file
+        return data
+    finally:
+        copy.close()
 
 
 def replace_text(page: pymupdf.Page, rect: list[float], new_text: str, *,

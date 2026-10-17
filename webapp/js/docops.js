@@ -6,10 +6,11 @@
 
 import * as model from './model.js';
 import { getPref } from './defaults.js';
-import { confirmDialog, formDialog, infoDialog } from './dialogs.js';
+import { choiceDialog, confirmDialog, customDialog, formDialog, infoDialog, node } from './dialogs.js';
+import { pickFiles } from './convert.js';
 import {
   $, viewer, state, toast, busy, paint, post, docUrl, structural, reloadFrom, errorDetail,
-  downloadResponse, exportVia, targetPages, describePages, hooks,
+  downloadResponse, exportVia, targetPages, describePages, hooks, prepareAnnots,
 } from './ctx.js';
 
 const UNDO_NOTE = '実行後も Ctrl+Z で元に戻せます（このタブを開いている間）。';
@@ -147,6 +148,9 @@ export async function addMargins() {
     fields: [
       { key: 'side', label: '余白を足す場所', type: 'select', options: { right: '右', bottom: '下', left: '左', top: '上', all: '四方すべて' } },
       { key: 'amount', label: '余白の幅（mm）', type: 'number', value: 60, min: 5, max: 300 },
+      { key: 'pattern', label: '余白の柄', type: 'select', value: 'lines', options: {
+        lines: '罫線（ノート）', grid: '方眼（5mm）', dots: 'ドット（5mm）', none: '無地',
+      } },
       { key: 'scope', label: '対象', type: 'select', options: { all: 'すべてのページ', picked: `${describePages(targetPages())}だけ` } },
     ],
     confirmLabel: '余白を足す',
@@ -156,7 +160,9 @@ export async function addMargins() {
   const sides = { left: 0, top: 0, right: 0, bottom: 0 };
   if (values.side === 'all') for (const key of Object.keys(sides)) sides[key] = points;
   else sides[values.side] = points;
-  const result = await structural('/pages/margins', { pages: values.scope === 'all' ? [] : targetPages(), ...sides }, { label: '余白の追加' });
+  const result = await structural('/pages/margins', {
+    pages: values.scope === 'all' ? [] : targetPages(), ...sides, pattern: values.pattern,
+  }, { label: '余白の追加' });
   if (result) toast('余白を足しました（Ctrl+Z で戻せます）');
 }
 
@@ -194,15 +200,19 @@ export async function fitPaper() {
 export async function handout() {
   const values = await formDialog({
     title: '配布資料にする（複数ページを1枚に）',
-    intro: 'スライドなどを1枚のA4に並べたPDFを書き出します。印刷枚数を減らしたいときに。書き込みも一緒に入ります。',
+    intro: 'スライドなどを1枚のA4に並べたPDFを書き出します。用紙の向きは、ページがいちばん大きく見える方に自動で決まります。書き込みも一緒に入ります。',
     fields: [
-      { key: 'perSheet', label: '1枚あたり', type: 'select', value: '4', options: { 2: '2ページ（横向き）', 4: '4ページ', 6: '6ページ', 8: '8ページ（横向き）', 9: '9ページ' } },
+      { key: 'perSheet', label: '1枚あたり', type: 'select', value: '4', options: {
+        notes3: '3ページ＋メモ欄（罫線）', 2: '2ページ', 4: '4ページ', 6: '6ページ', 8: '8ページ', 9: '9ページ',
+      } },
       { key: 'border', label: '枠線を付ける', type: 'checkbox', value: true },
+      { key: 'numbers', label: '用紙の下に番号を入れる', type: 'checkbox', value: false },
     ],
     confirmLabel: '書き出す',
   });
   if (!values) return;
-  await exportVia('/nup', { perSheet: Number(values.perSheet), border: values.border }, { label: '配布資料の作成', fallback: 'handout.pdf' });
+  const perSheet = values.perSheet === 'notes3' ? 'notes3' : Number(values.perSheet);
+  await exportVia('/nup', { perSheet, border: values.border, numbers: values.numbers }, { label: '配布資料の作成', fallback: 'handout.pdf' });
 }
 
 export async function exportImages() {
@@ -314,19 +324,25 @@ export async function addWatermark() {
   const values = await formDialog({
     title: '透かしを入れる',
     fields: [
-      { key: 'text', label: '文字', value: '社外秘' },
+      { key: 'preset', label: '文字', type: 'select', value: '社外秘', options: {
+        社外秘: '社外秘', 取扱注意: '取扱注意', 関係者限り: '関係者限り', コピー禁止: 'コピー禁止',
+        下書き: '下書き', DRAFT: 'DRAFT', 見本: '見本', SAMPLE: 'SAMPLE', CONFIDENTIAL: 'CONFIDENTIAL',
+        custom: '自分で入力…',
+      } },
+      { key: 'text', label: '入れる文字', placeholder: '例: 回覧用', showWhen: (v) => v.preset === 'custom' },
       { key: 'colour', label: '色', type: 'colour', value: '#c0c0c0' },
       { key: 'size', label: 'サイズ', type: 'number', value: 54, min: 8, max: 200 },
       { key: 'opacity', label: '濃さ（0〜1）', type: 'number', value: 0.25, min: 0.05, max: 1, step: 0.05 },
       { key: 'angle', label: '角度', type: 'number', value: 45, min: -90, max: 90 },
       { key: 'allPages', label: '全ページに入れる', type: 'checkbox', value: true },
     ],
-    validate: (v) => (v.text.trim() ? null : '文字を入力してください'),
+    validate: (v) => (v.preset !== 'custom' || v.text.trim() ? null : '入れる文字を入力してください'),
     confirmLabel: '入れる',
   });
   if (!values) return;
+  const text = values.preset === 'custom' ? values.text.trim() : values.preset;
   const result = await structural('/stamp-pages', {
-    kind: 'watermark', ...values, pages: values.allPages ? null : targetPages(),
+    kind: 'watermark', ...values, text, pages: values.allPages ? null : targetPages(),
   }, { label: '透かし' });
   if (result) toast('透かしを入れました（Ctrl+Z で戻せます）');
 }
@@ -338,15 +354,27 @@ export async function addHeaderFooter() {
     fields: [
       { key: 'header', label: 'ヘッダー（上）', placeholder: '例: レビュー用' },
       { key: 'footer', label: 'フッター（下）', value: '{page} / {pages}' },
+      { key: 'align', label: '位置', type: 'select', value: 'center', options: {
+        center: '中央', right: '右', left: '左', outside: '外側（両面印刷用：奇数は右・偶数は左）',
+      } },
+      { key: 'skip', label: '番号を付けない最初のページ数', type: 'number', value: 0, min: 0, max: 99,
+        hint: '表紙だけ番号なしにするなら 1' },
+      { key: 'start', label: '最初の番号', type: 'number', value: 1, min: 0, max: 99999 },
       { key: 'size', label: '文字サイズ', type: 'number', value: 9, min: 5, max: 24 },
       { key: 'colour', label: '色', type: 'colour', value: '#555555' },
     ],
-    validate: (v) => (v.header.trim() || v.footer.trim() ? null : 'ヘッダーかフッターを入力してください'),
+    validate: (v) => {
+      if (!v.header.trim() && !v.footer.trim()) return 'ヘッダーかフッターを入力してください';
+      if (Number(v.skip) >= model.store.pages.length) return `番号を付けないページが多すぎます（全部で ${model.store.pages.length} ページ）`;
+      return null;
+    },
     confirmLabel: '入れる',
   });
   if (!values) return;
-  const result = await structural('/stamp-pages', { kind: 'headerFooter', ...values }, { label: 'ヘッダー・フッター' });
-  if (result) toast('入れました（Ctrl+Z で戻せます）');
+  const result = await structural('/stamp-pages', {
+    kind: 'headerFooter', ...values, skip: Number(values.skip) || 0, start: Number(values.start) || 1,
+  }, { label: 'ヘッダー・フッター' });
+  if (result) toast('ページ番号・ヘッダー・フッターを入れました（Ctrl+Z で戻せます）');
 }
 
 export async function addBates() {
@@ -607,12 +635,25 @@ export async function compressDocument() {
     fields: [
       { key: 'level', label: '軽さ', type: 'select', value: 'medium', options: {
         light: '画質優先（200dpi）', medium: '標準（150dpi）', strong: 'できるだけ軽く（100dpi）',
+        size: '指定したサイズ以下にする',
       } },
+      { key: 'targetMB', label: '何MB以下に', type: 'number', value: 2, min: 0.1, max: 500, step: 0.1,
+        hint: 'メール添付は 2〜10MB、提出システムは案内に書かれた上限を', showWhen: (v) => v.level === 'size' },
     ],
     warning: UNDO_NOTE,
+    validate: (v) => (v.level !== 'size' || Number(v.targetMB) > 0 ? null : 'サイズを入力してください'),
     confirmLabel: '軽くする',
   });
   if (!values) return;
+  if (values.level === 'size') {
+    const target = Number(values.targetMB);
+    const result = await structural('/compress-target', { targetMB: target }, { label: '軽量化' });
+    if (!result) return;
+    if (result.unchanged) toast(`もともと ${kb(result.actual)} で、${target}MB 以下です。変更していません`);
+    else if (result.fits) toast(`${kb(result.before)} → ${kb(result.actual)} にしました（${target}MB 以下）`);
+    else toast(`できるだけ軽くしましたが ${kb(result.actual)} です（${target}MB には届きません）。「分割」の「ファイルサイズごと」で分けて送る方法もあります`, 'warn');
+    return;
+  }
   const preset = { light: [200, 85], medium: [150, 75], strong: [100, 60] }[values.level];
   const result = await structural('/compress', { dpi: preset[0], quality: preset[1] }, { label: '軽量化' });
   if (!result) return;
@@ -736,4 +777,245 @@ export async function showSignatureState() {
     ? signatures.fields.map((f) => `・${f.name || '(無名)'} — ${f.page + 1}ページ・${f.signed ? '署名済み' : '未署名'}`).join('\n')
     : '署名欄はありません。';
   await infoDialog({ title: '電子署名の状態', intro: lines, warning: signatures.note });
+}
+
+// ---------------------------------------------------------------- everyday extras
+
+export async function grayscaleDocument() {
+  const ok = await confirmDialog({
+    title: '白黒（グレースケール）にしますか',
+    intro: '文字・図・写真・書き込みの色をすべて灰色の濃淡にします。文字は文字のまま（検索・選択できます）。'
+      + 'カラー印刷の料金を抑えたいとき、白黒での提出を求められたときに。',
+    warning: UNDO_NOTE,
+    confirmLabel: '白黒にする',
+  });
+  if (!ok) return;
+  const result = await structural('/grayscale', {}, { label: '白黒への変換' });
+  if (result) toast('白黒にしました（Ctrl+Z で戻せます）');
+}
+
+export async function removeBlankPages() {
+  const values = await formDialog({
+    title: '白紙のページを探して削除',
+    intro: '両面スキャンで混ざった白紙の裏面などを探します。文字が1文字でもあるページは対象外です。',
+    fields: [
+      { key: 'sensitivity', label: '白紙とみなす基準', type: 'select', value: 'normal', options: {
+        strict: '真っ白なページだけ', normal: '標準（スキャンのかすかな汚れは無視）', loose: 'ゆるめ（裏写りも白紙とみなす）',
+      } },
+    ],
+    confirmLabel: '探す',
+  });
+  if (!values) return;
+  const done = busy('白紙のページを探しています…');
+  let found;
+  try {
+    await paint();
+    const response = await post('/blank-find', { sensitivity: values.sensitivity }, { withAnnots: true });
+    if (!response.ok) { toast(`探せませんでした: ${await errorDetail(response)}`, 'error'); return; }
+    found = (await response.json()).pages || [];
+  } catch (err) {
+    toast(`探せませんでした: ${err.message}`, 'error');
+    return;
+  } finally {
+    done();
+  }
+  if (!found.length) { toast('白紙のページは見つかりませんでした'); return; }
+  if (found.length >= model.store.pages.length) {
+    toast('すべてのページが白紙と判定されたため、削除しません。基準を「真っ白なページだけ」にしてみてください', 'warn');
+    return;
+  }
+  const list = found.length <= 12 ? found.map((p) => p + 1).join('・') : `${found.slice(0, 12).map((p) => p + 1).join('・')} ほか`;
+  const answer = await choiceDialog({
+    title: `白紙のページが ${found.length} ページあります`,
+    intro: `${list} ページ目。削除する前に、ページ一覧で選んだ状態にして確かめることもできます。`,
+    warning: UNDO_NOTE,
+    choices: [
+      { label: 'キャンセル', value: null },
+      { label: 'ページ一覧で選ぶだけ', value: 'select' },
+      { label: `${found.length} ページを削除`, value: 'delete', primary: true },
+    ],
+  });
+  if (answer === 'select') {
+    state.pageSelection.clear();
+    for (const page of found) state.pageSelection.add(page);
+    viewer.scrollToPage(found[0]);
+    hooks.refreshAll();
+    toast('白紙と判定したページを選びました。違うものは Ctrl を押しながらクリックで外し、「ページ」→「削除」で消せます');
+    return;
+  }
+  if (answer !== 'delete') return;
+  const result = await structural('/pages/delete', { pages: found }, { label: 'ページ削除' });
+  if (result) { state.pageSelection.clear(); hooks.refreshAll(); toast(`白紙のページを ${found.length} ページ削除しました（Ctrl+Z で戻せます）`); }
+}
+
+/** The page order that puts a stack scanned fronts-then-backs back together. */
+export function duplexOrder(count, backsReversed) {
+  const fronts = Math.ceil(count / 2);
+  const order = [];
+  for (let i = 0; i < fronts; i += 1) {
+    order.push(i);
+    const back = backsReversed ? count - 1 - i : fronts + i;
+    if (back >= fronts && back < count) order.push(back);
+  }
+  return order;
+}
+
+export async function reorderDuplex() {
+  const count = model.store.pages.length;
+  if (count < 2) { toast('2ページ以上あるPDFで使えます', 'warn'); return; }
+  const values = await formDialog({
+    title: '両面スキャンを正しい順に並べる',
+    intro: '片面ずつしか読めないスキャナで、表面をまとめて読み、続けて裏面を読んだPDFを、1・2・3…の順に並べ直します。'
+      + `前半 ${Math.ceil(count / 2)} ページを表面、残りを裏面として扱います。`,
+    fields: [
+      { key: 'mode', label: '裏面の読み取り方', type: 'select', value: 'reversed', options: {
+        reversed: '束をそのまま裏返して読んだ（裏面が逆順）',
+        same: '裏面も1枚目から順に読んだ',
+      } },
+    ],
+    warning: count % 2 ? `ページ数が奇数（${count}）です。最後の表面には裏面がないものとして並べます。` : UNDO_NOTE,
+    confirmLabel: '並べ替える',
+  });
+  if (!values) return;
+  const order = duplexOrder(count, values.mode === 'reversed');
+  const result = await structural('/pages/reorder', { order }, { label: '並べ替え' });
+  if (result) { viewer.scrollToPage(0); toast('表と裏が交互になるように並べ替えました（Ctrl+Z で戻せます）'); }
+}
+
+export async function replacePages() {
+  const pages = targetPages();
+  const [file] = await pickFiles('application/pdf,.pdf', false);
+  if (!file) return;
+  const values = await formDialog({
+    title: 'ページを差し替える',
+    intro: `${describePages(pages)}を「${file.name}」のページと入れ替えます。しおりや他のページはそのままです。`,
+    fields: [
+      { key: 'first', label: `「${file.name}」の何ページ目から使うか`, type: 'number', value: 1, min: 1, max: 9999,
+        hint: pages.length > 1 ? `そこから ${pages.length} ページを順に使います` : '' },
+    ],
+    warning: UNDO_NOTE,
+    confirmLabel: '差し替える',
+  });
+  if (!values) return;
+  const form = new FormData();
+  form.append('files', file);
+  form.append('pages', JSON.stringify(pages));
+  form.append('first', String(Math.max(0, Number(values.first) - 1)));
+  const prepared = await prepareAnnots();
+  form.append('annots', JSON.stringify(prepared.annots));
+  form.append('fonts', JSON.stringify(prepared.fonts));
+  const done = busy('ページを差し替えています…');
+  try {
+    await paint();
+    const response = await fetch(docUrl('/replace-pages'), { method: 'POST', body: form });
+    if (!response.ok) { toast(`差し替えられませんでした: ${await errorDetail(response)}`, 'error'); return; }
+    await reloadFrom(await response.json());
+    state.unsaved = true;
+    hooks.refreshAll();
+    toast(`${describePages(pages)}を差し替えました（Ctrl+Z で戻せます）`);
+  } catch (err) {
+    toast(`差し替えられませんでした: ${err.message}`, 'error');
+  } finally {
+    done();
+  }
+}
+
+export async function makeBooklet() {
+  const values = await formDialog({
+    title: '小冊子にする（中とじ印刷用）',
+    intro: '1枚の紙の表と裏に2ページずつ、折って重ねると順番どおりになる並びで書き出します。'
+      + '開いている文書は変わりません。ページ数が4の倍数でなければ、最後に白紙が入ります。',
+    fields: [
+      { key: 'paper', label: '印刷する紙', type: 'select', value: 'a4', options: {
+        a4: 'A4（仕上がり A5 の冊子）', a3: 'A3（仕上がり A4 の冊子）', b4: 'B4（仕上がり B5 の冊子）',
+      } },
+    ],
+    confirmLabel: '書き出す',
+  });
+  if (!values) return;
+  const ok = await exportVia('/booklet', { paper: values.paper }, { label: '小冊子の作成', fallback: 'booklet.pdf' });
+  if (ok) {
+    await infoDialog({
+      title: '印刷のしかた',
+      intro: '書き出したPDFを、プリンターの「両面印刷」で「短辺とじ（短辺で綴じる）」を選んで印刷してください。'
+        + '刷り上がった束をそのまま半分に折り、折り目をホチキスで留めると冊子になります。',
+    });
+  }
+}
+
+const PII_KINDS = {
+  phone: '電話番号', email: 'メールアドレス', postal: '郵便番号', mynumber: 'マイナンバー', card: 'クレジットカード番号',
+};
+
+/** "090-1234-5678" → "090-****-5678": enough to recognise it in the list without repeating it in full. */
+function maskForList(text) {
+  const chars = [...text];
+  if (chars.length <= 4) return text;
+  const keep = Math.max(2, Math.floor(chars.length / 4));
+  return chars.map((c, i) => (i < keep || i >= chars.length - keep || !/[0-9０-９A-Za-z]/.test(c) ? c : '*')).join('');
+}
+
+export async function redactPersonalInfo() {
+  const kinds = await formDialog({
+    title: '個人情報を探して墨消し',
+    intro: '文書の文字から、電話番号・メールアドレスなどを探し、墨消しの指定を付けます。見つかったものは一覧で確かめてから指定できます。'
+      + 'マイナンバーとカード番号は検査用の数字で確かめるので、注文番号などを間違えて拾いにくくなっています。',
+    fields: Object.entries(PII_KINDS).map(([key, label]) => ({ key, label, type: 'checkbox', value: true })),
+    validate: (v) => (Object.keys(PII_KINDS).some((k) => v[k]) ? null : '探すものを1つ以上選んでください'),
+    confirmLabel: '探す',
+  });
+  if (!kinds) return;
+  const done = busy('個人情報を探しています…');
+  let items;
+  try {
+    await paint();
+    const response = await post('/pii-find', { kinds: Object.keys(PII_KINDS).filter((k) => kinds[k]) }, { withAnnots: true });
+    if (!response.ok) { toast(`探せませんでした: ${await errorDetail(response)}`, 'error'); return; }
+    items = (await response.json()).items || [];
+  } catch (err) {
+    toast(`探せませんでした: ${err.message}`, 'error');
+    return;
+  } finally {
+    done();
+  }
+  if (!items.length) {
+    toast('見つかりませんでした（スキャンした文書は、先に「ツール」→「文字認識」をすると探せるようになります）', 'warn');
+    return;
+  }
+  const boxes = [];
+  const chosen = await customDialog({
+    title: `${items.length} 件見つかりました`,
+    intro: '墨消しを指定するものにチェックを入れてください。実際に消すのは、このあとの「墨消しを適用」です。',
+    wide: true,
+    build: () => {
+      const list = node('div', { class: 'pii-list' });
+      const all = node('input', { type: 'checkbox', checked: true });
+      all.addEventListener('change', () => { for (const box of boxes) box.checked = all.checked; });
+      list.append(node('label', { class: 'pii-row pii-all' }, [all, node('span', { text: 'すべて選ぶ／外す' })]));
+      items.forEach((item, index) => {
+        const box = node('input', { type: 'checkbox', checked: true, 'data-index': index });
+        boxes.push(box);
+        list.append(node('label', { class: 'pii-row' }, [
+          box,
+          node('span', { class: 'pii-page', text: `${item.page + 1} ページ` }),
+          node('span', { class: 'pii-kind', text: item.label }),
+          node('span', { class: 'pii-text', text: maskForList(item.text) }),
+        ]));
+      });
+      const overlay = node('input', { class: 'input', placeholder: '黒塗りの上に出す文字（空欄なら出しません）例: ［非開示］' });
+      overlay.dataset.role = 'overlay';
+      list.append(overlay);
+      return list;
+    },
+    onConfirm: () => {
+      const picked = boxes.filter((b) => b.checked).map((b) => items[Number(b.dataset.index)]);
+      if (!picked.length) { toast('1つ以上選んでください', 'warn'); return null; }
+      const overlay = document.querySelector('.pii-list [data-role="overlay"]')?.value || '';
+      return { picked, overlay };
+    },
+    confirmLabel: '墨消しを指定する',
+  });
+  if (!chosen) return;
+  const result = await structural('/pii-mark', { items: chosen.picked, overlay: chosen.overlay }, { label: '墨消しの指定' });
+  if (result) toast(`${result.marked} 箇所に墨消しを指定しました。「墨消しを適用」で実際に削除されます`);
 }

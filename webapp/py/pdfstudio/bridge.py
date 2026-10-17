@@ -25,7 +25,7 @@ import zipfile
 
 import pymupdf
 
-from . import accessibility, annots, compare, content, convert as convert_mod, export, forms, measure, pages, session, signing
+from . import accessibility, annots, compare, content, convert as convert_mod, export, extras, forms, measure, pages, session, signing
 from .common import page_info, rect_to_page, to_view
 
 
@@ -62,6 +62,21 @@ def _describe(entry: session.Doc) -> dict:
         "undoDepth": len(entry.snapshots),
         "redoDepth": len(entry.redos),
     }
+
+
+def _merge(out: dict, report: dict) -> dict:
+    """Add an operation's report to a reload payload without clobbering it.
+
+    A report key that collides with the document description (``pages`` is a
+    count in a report but the page list in a reload) would break the browser's
+    copy of the document, so a colliding key goes under ``report`` instead.
+    """
+    for key, value in report.items():
+        if key in out:
+            out.setdefault("report", {})[key] = value
+        else:
+            out[key] = value
+    return out
 
 
 def _sync(entry: session.Doc, payload: dict, required: bool = False) -> int:
@@ -111,6 +126,7 @@ def open_document(payload: dict) -> dict:
         raise ApiError(400, "このPDFは壊れていて、ページを読み取れませんでした。ダウンロードし直すと開けることがあります")
     result = _describe(entry)
     result["wasProtected"] = entry.was_protected
+    result["restrictions"] = entry.restrictions
     return result
 
 
@@ -255,6 +271,7 @@ def page_action(payload: dict) -> dict:
                 entry.doc, targets or None,
                 left=float(payload.get("left", 0)), top=float(payload.get("top", 0)),
                 right=float(payload.get("right", 0)), bottom=float(payload.get("bottom", 0)),
+                pattern=str(payload.get("pattern") or "none"),
             )
         elif action == "reorder":
             order = [int(p) for p in payload.get("order") or []]
@@ -308,7 +325,8 @@ def stamp_pages(payload: dict) -> dict:
             pages.header_footer(
                 entry.doc, header=payload.get("header", ""), footer=payload.get("footer", ""),
                 pages=payload.get("pages"), size=float(payload.get("size", 9)),
-                colour=payload.get("colour", "#555555"),
+                colour=payload.get("colour", "#555555"), align=str(payload.get("align") or "center"),
+                start=int(payload.get("start", 1) or 1), skip=int(payload.get("skip", 0) or 0),
             )
         elif kind == "bates":
             pages.bates(
@@ -354,7 +372,7 @@ def redact_apply(payload: dict) -> dict:
         pages.scrub(entry.doc)
     entry.commit()
     out = _reload(entry, backup)
-    out.update(result)
+    _merge(out, result)
     return out
 
 
@@ -386,7 +404,7 @@ def optimise_document(payload: dict) -> dict:
     report = pages.optimise(entry.doc)
     entry.commit()
     out = _reload(entry, backup)
-    out.update(report)
+    _merge(out, report)
     out["actual"] = len(entry.bytes())
     return out
 
@@ -532,7 +550,7 @@ def _finish(entry: session.Doc, backup: str | None, extra: dict) -> dict:
     """A plain answer for a quiet edit, or a full description when it was snapshotted (the page reloads)."""
     if backup is None:
         return extra
-    return {**_reload(entry, backup), **extra}
+    return _merge(_reload(entry, backup), extra)
 
 
 def fields_fill(payload: dict) -> dict:
@@ -636,7 +654,7 @@ def accessibility_autotag(payload: dict) -> dict:
     report = accessibility.autotag(entry.doc, language=payload.get("language", "ja-JP"))
     entry.commit()
     out = _reload(entry, backup)
-    out.update(report)
+    _merge(out, report)
     out["audit"] = accessibility.audit(entry.doc)
     return out
 
@@ -768,7 +786,7 @@ def compress_document(payload: dict) -> dict:
     )
     entry.commit()
     out = _reload(entry, backup)
-    out.update(report)
+    _merge(out, report)
     out["actual"] = len(entry.bytes())
     return out
 
@@ -1002,8 +1020,12 @@ def _stem(entry: session.Doc) -> str:
 def _nup(payload: dict):
     entry = _doc(payload)
     _sync(entry, payload)
-    data = pages.nup(entry.doc, int(payload.get("perSheet", 2)), border=bool(payload.get("border", True)))
-    return f"{_stem(entry)}-{int(payload.get('perSheet', 2))}up.pdf", "application/pdf", data
+    per_sheet = payload.get("perSheet", 2)
+    per_sheet = "notes3" if str(per_sheet) == "notes3" else int(per_sheet)
+    data = pages.nup(entry.doc, per_sheet, border=bool(payload.get("border", True)),
+                     numbers=bool(payload.get("numbers", False)))
+    suffix = "notes" if per_sheet == "notes3" else f"{per_sheet}up"
+    return f"{_stem(entry)}-{suffix}.pdf", "application/pdf", data
 
 
 def _split(payload: dict):
@@ -1172,6 +1194,108 @@ def _download(payload: dict):
     return name, "application/pdf", entry.bytes()
 
 
+# ==================================================================== everyday extras
+
+
+def grayscale_document(payload: dict) -> dict:
+    entry = _doc(payload)
+    _sync(entry, payload)
+    backup = entry.snapshot("before-grayscale")
+    try:
+        extras.grayscale(entry.doc)
+    except Exception as exc:
+        raise ApiError(400, f"白黒にできませんでした: {exc}")
+    entry.commit()
+    return _reload(entry, backup)
+
+
+def blank_find(payload: dict) -> dict:
+    entry = _doc(payload)
+    _sync(entry, payload)
+    return {"pages": extras.blank_pages(entry.doc, sensitivity=str(payload.get("sensitivity") or "normal"))}
+
+
+def pii_find(payload: dict) -> dict:
+    entry = _doc(payload)
+    _sync(entry, payload)
+    return {"items": extras.find_personal_info(entry.doc, payload.get("kinds") or None)}
+
+
+def pii_mark(payload: dict) -> dict:
+    entry = _doc(payload)
+    _sync(entry, payload)
+    marked = extras.mark_redactions(entry.doc, payload.get("items") or [], overlay=str(payload.get("overlay") or ""))
+    entry.commit()
+    out = _reload(entry)
+    out["marked"] = marked
+    return out
+
+
+def compress_target(payload: dict) -> dict:
+    entry = _doc(payload)
+    _sync(entry, payload)
+    target = int(float(payload.get("targetMB") or 0) * 1024 * 1024)
+    if target <= 0:
+        raise ApiError(400, "目標のサイズを指定してください")
+    before = len(entry.bytes())
+    if before <= target:
+        out = _reload(entry)
+        out.update({"before": before, "actual": before, "fits": True, "unchanged": True})
+        return out
+    backup = entry.snapshot("before-compress")
+    data, info = extras.compress_to_size(entry.doc.tobytes(), target)
+    entry.replace(data)
+    entry.commit()
+    out = _reload(entry, backup)
+    _merge(out, info)
+    out["before"] = before
+    out["actual"] = len(entry.bytes())
+    return out
+
+
+def pages_replace(payload: dict) -> dict:
+    entry = _doc(payload)
+    files = payload.get("files") or []
+    if not files:
+        raise ApiError(400, "差し替えに使うPDFを選んでください")
+    try:
+        source = pymupdf.open("pdf", _bytes(files[0].get("data")))
+    except Exception:
+        raise ApiError(400, "差し替えに使うファイルを PDF として開けませんでした")
+    if source.needs_pass:
+        source.close()
+        raise ApiError(400, "差し替えに使うPDFにパスワードが掛かっています。先にパスワードを外してください")
+    targets = payload.get("pages") or []
+    if isinstance(targets, str):
+        targets = json.loads(targets)
+    targets = sorted({int(t) for t in targets if 0 <= int(t) < entry.doc.page_count})
+    first = int(payload.get("first") or 0)
+    if not targets:
+        source.close()
+        raise ApiError(400, "差し替えるページがありません")
+    if first < 0 or first + len(targets) > source.page_count:
+        count = source.page_count
+        source.close()
+        raise ApiError(400, f"差し替えに使うPDFのページが足りません（{count} ページしかありません）")
+    _sync(entry, payload)
+    backup = entry.snapshot("before-replace")
+    try:
+        count = extras.replace_pages(entry.doc, targets, source, first)
+    finally:
+        source.close()
+    entry.commit()
+    out = _reload(entry, backup)
+    out["replaced"] = count
+    return out
+
+
+def _booklet(payload: dict):
+    entry = _doc(payload)
+    _sync(entry, payload)
+    paper = str(payload.get("paper") or "a4")
+    return f"{_stem(entry)}-小冊子.pdf", "application/pdf", extras.booklet(entry.doc, paper)
+
+
 # ==================================================================== dispatch table
 
 _JSON_ROUTES = {
@@ -1227,6 +1351,12 @@ _JSON_ROUTES = {
     "ocr.apply": ocr_apply,
     "page.text": page_text,
     "stats": stats,
+    "grayscale": grayscale_document,
+    "blank.find": blank_find,
+    "pii.find": pii_find,
+    "pii.mark": pii_mark,
+    "compress.target": compress_target,
+    "pages.replace": pages_replace,
 }
 
 _BINARY_ROUTES = {
@@ -1248,6 +1378,7 @@ _BINARY_ROUTES = {
     "images.extract": _extract_images,
     "office.to-pdf": _office_to_pdf,
     "pdf.to-office": _pdf_to_office,
+    "booklet": _booklet,
 }
 
 

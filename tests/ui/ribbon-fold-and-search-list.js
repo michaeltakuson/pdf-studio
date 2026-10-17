@@ -68,7 +68,8 @@ async (page) => {
   await page.keyboard.press('Escape');
   await page.keyboard.press('Control+f');
   await page.keyboard.type('redaction'); await page.keyboard.press('Enter');
-  await page.waitForFunction(() => document.querySelector('#searchCount').textContent !== '', null, { timeout: 60000 });
+  // "検索中…" shows first; wait for the count itself.
+  await page.waitForFunction(() => /\d+ \/ \d+/.test(document.querySelector('#searchCount').textContent), null, { timeout: 60000 });
   await page.locator('#searchCount').click({ timeout: 5000 }); await page.waitForTimeout(300);
   out.rows = await page.locator('.hit-row').evaluateAll((rows) => rows.slice(0, 2).map((r) => r.querySelector('.ctx').innerHTML));
   await page.keyboard.press('Escape');

@@ -79,6 +79,29 @@ export function confirmDialog(options) {
   });
 }
 
+/**
+ * A question with more than two answers. `choices` are {label, value, primary?, danger?},
+ * shown left to right; Escape or a click outside resolves to null.
+ */
+export function choiceDialog({ choices, ...options }) {
+  return new Promise((resolve) => {
+    const { backdrop, dialog } = shell({ ...options, hideCancel: true });
+    const finish = (value) => { backdrop.remove(); resolve(value ?? null); };
+    const actions = dialog.querySelector('.dialog-actions');
+    actions.replaceChildren();
+    let focus = null;
+    for (const choice of choices) {
+      const button = node('button', { class: `btn${choice.primary ? ' primary' : ''}`, text: choice.label });
+      if (choice.danger) button.style.cssText = 'color:var(--danger)';
+      button.addEventListener('click', () => finish(choice.value));
+      actions.append(button);
+      if (choice.primary) focus = button;
+    }
+    mount(backdrop, finish);
+    (focus || actions.lastElementChild)?.focus();
+  });
+}
+
 /** A message with a single button. */
 export function infoDialog(options) {
   return confirmDialog({ confirmLabel: '閉じる', hideCancel: true, ...options });

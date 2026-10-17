@@ -14,6 +14,7 @@
 | `ribbon-fold-and-search-list.js` | リボンの折りたたみ（Ctrl+F1・ダブルクリック・一時表示）・検索結果の一覧 |
 | `convert-and-organize.js` | Word→PDF・結合・ページ整理のダイアログ |
 | `undo-stamps-close.js` | ページ操作の元に戻す／やり直し・透かしを入れて取り除く・ファイルを閉じる |
+| `everyday-extras.js` | 両面スキャンの並べ替え・白紙ページの削除・個人情報の墨消し・白黒化・罫線の余白・ページ番号（表紙なし）・透かしの定番文言・QRコード・改行をつなげてコピー・保存確認の3択（先に `python tests/make_extras_sample.py`） |
 | `edit-while-loading.js` | エンジンの準備中に書き込み、準備完了後に引き継がれること |
 
 ## 使い方

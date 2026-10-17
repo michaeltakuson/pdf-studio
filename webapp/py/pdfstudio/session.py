@@ -32,6 +32,7 @@ class Doc:
         self.name = name
         self.doc = pymupdf.open("pdf", data)
         self.was_protected = False
+        self.restrictions: list[str] = []
         # label -> pdf bytes, most recent first. Kept short: this is an
         # in-tab undo net for destructive operations, not archival storage.
         self.snapshots: list[tuple[str, bytes]] = []
@@ -76,6 +77,8 @@ class Doc:
         self.doc = pymupdf.open("pdf", data)
         return label
 
+    fonts_pending = False
+
     def replace(self, data: bytes) -> None:
         self.doc.close()
         self.doc = pymupdf.open("pdf", data)
@@ -98,7 +101,17 @@ class Doc:
         "overwriting does not delete the page" trap. Rewriting with garbage
         collection is what actually drops deleted content.
         """
-        return self.doc.tobytes(garbage=3, deflate=True)
+        from . import content
+
+        data = content.compact_bytes(self.doc)
+        # Once text has been written into pages with a whole font, every file
+        # handed out is cut down to the glyphs used (see content.subset). It
+        # stays on after an undo, which may bring back a page with such text.
+        if content.subset_pending(self.doc):
+            self.fonts_pending = True
+        if self.fonts_pending:
+            data = content.finish_fonts(data)
+        return data
 
     def close(self) -> None:
         try:
@@ -133,11 +146,41 @@ def _unlock(data: bytes, password: str) -> tuple[bytes, bool]:
         probe.close()
 
 
+# What the author of a file forbade, worded for the reader. These are the
+# permission flags of a file that opens without a password but carries an
+# owner password; they are not enforced by MuPDF, so the reader is told.
+_PERMISSIONS = (
+    (pymupdf.PDF_PERM_MODIFY, "内容の変更"),
+    (pymupdf.PDF_PERM_ANNOTATE, "注釈・書き込み"),
+    (pymupdf.PDF_PERM_FORM, "フォームへの入力"),
+    (pymupdf.PDF_PERM_ASSEMBLE, "ページの追加・削除・並べ替え"),
+    (pymupdf.PDF_PERM_COPY, "文字のコピー"),
+    (pymupdf.PDF_PERM_PRINT, "印刷"),
+)
+
+
+def restrictions_of(data: bytes) -> list[str]:
+    """The uses the author of an encrypted-but-openable file did not allow."""
+    try:
+        probe = pymupdf.open("pdf", data)
+    except Exception:  # noqa: BLE001 - opening reports its own errors
+        return []
+    try:
+        if probe.needs_pass or not (probe.metadata or {}).get("encryption"):
+            return []
+        allowed = probe.permissions
+        return [label for flag, label in _PERMISSIONS if not allowed & flag]
+    finally:
+        probe.close()
+
+
 def create(name: str, data: bytes, password: str = "") -> Doc:
+    restrictions = restrictions_of(data) if not password else []
     data, was_protected = _unlock(data, password)
     doc_id = uuid.uuid4().hex[:12]
     doc = Doc(doc_id, name, data)
     doc.was_protected = was_protected
+    doc.restrictions = restrictions
     _docs[doc_id] = doc
     return doc
 

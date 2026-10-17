@@ -191,6 +191,9 @@ async function route(url, init) {
     'extract-ranges': 'pages.extract-ranges', 'ocr-apply': 'ocr.apply',
     outline: 'outline.set', metadata: 'metadata.set', snapshot: 'snapshot', 'outline-auto': 'outline.auto', 'fit-paper': 'fit-paper',
     'extract-images': 'images.extract', 'to-office': 'pdf.to-office',
+    grayscale: 'grayscale', 'blank-find': 'blank.find', 'pii-find': 'pii.find', 'pii-mark': 'pii.mark',
+    'compress-target': 'compress.target', booklet: 'booklet',
+    'replace-pages': 'pages.replace',
   };
   if (rest[0] === 'organize' && method === 'POST') {
     return { action: 'pages.organize', payload: await readPayload(init, base) };

@@ -11,7 +11,7 @@ import {
 import * as measure from './measure.js';
 import { remember, getPref, setPref, styleFor } from './defaults.js';
 import {
-  confirmDialog, formDialog, infoDialog, customDialog, openMenu, openMenuAt, openPopover, isComposing, node,
+  confirmDialog, choiceDialog, formDialog, infoDialog, customDialog, openMenu, openMenuAt, openPopover, isComposing, node,
 } from './dialogs.js';
 import { Ribbon } from './ribbon.js';
 import { iconSvg } from './icons.js';
@@ -36,11 +36,17 @@ const isTextTool = (tool) => tool === 'freetext' || tool === 'callout';
 
 async function confirmDiscard() {
   if (!state.unsaved) return true;
-  return confirmDialog({
+  const answer = await choiceDialog({
     title: '保存していない変更があります',
     intro: `「${model.store.name}」への変更はまだファイルに保存されていません。このまま進むと失われます。`,
-    confirmLabel: '保存せずに進む', cancelLabel: '戻る', danger: true,
+    choices: [
+      { label: '戻る', value: null },
+      { label: '保存せずに進む', value: 'discard', danger: true },
+      { label: '保存して進む', value: 'save', primary: true },
+    ],
   });
+  if (answer === 'save') return saveToDisk();
+  return answer === 'discard';
 }
 
 async function adopt(data, { handle = null, message = null, draftKey = null, keepPosition = false } = {}) {
@@ -55,6 +61,9 @@ async function adopt(data, { handle = null, message = null, draftKey = null, kee
   state.searchHits = [];
   state.searchIndex = -1;
   setSearchCount('');
+  // A pen or text tool picked for the previous file would turn the first
+  // click on this one into a mark; a new document starts with the pointer.
+  if (!keepPosition && previous !== data.id) tools.setTool('select');
   model.loadDocument(data);
   $('#emptyState').classList.add('hidden');
   try {
@@ -85,7 +94,27 @@ async function adopt(data, { handle = null, message = null, draftKey = null, kee
   toast(message || `${data.name} を開きました${resumed}`);
   // Asked once the "opening…" indicator is out of the way; awaiting it here
   // would leave the question sitting underneath the indicator, unanswerable.
-  setTimeout(() => offerDraft(data), 60);
+  setTimeout(async () => { await noticeRestrictions(data); offerDraft(data); }, 60);
+}
+
+/**
+ * A file that opens without a password can still carry its author's "do not
+ * modify / annotate" flags. The engine does not enforce them, so say they are
+ * there, once per file, rather than let them disappear silently on save.
+ */
+async function noticeRestrictions(data) {
+  const list = data.restrictions || [];
+  if (!list.length) return;
+  const key = `pdfstudio.restrict.${data.name}.${list.join(',')}`;
+  try { if (localStorage.getItem(key)) return; } catch { /* storage blocked: ask every time */ }
+  await infoDialog({
+    title: 'このPDFには作成者の利用制限があります',
+    intro: `作成者が次の操作を許可しない設定にしています: ${list.join('、')}。`,
+    warning: 'PDF Studio はこの設定に関係なく編集できますが、自分で作った文書や、作成者・権利者の許可がある場合に限って使ってください。'
+      + '保存したファイルからはこの制限が外れます（付け直すには「ファイル」→「パスワードを付けて書き出す」で権限を指定）。',
+    confirmLabel: 'わかりました',
+  });
+  try { localStorage.setItem(key, '1'); } catch { /* storage blocked */ }
 }
 
 // ---------------------------------------------------------------- crash recovery
@@ -152,6 +181,7 @@ function positionKey() {
 async function previewFile(file, handle) {
   if (!(await confirmDiscard())) return;
   flushEditing();
+  tools.setTool('select');
   let settle;
   window.pdfStudioAdopted = new Promise((resolve, reject) => { settle = { resolve, reject }; });
   window.pdfStudioAdopted.catch(() => {});
@@ -221,7 +251,7 @@ async function finishPreview() {
     refreshAll();
     if (waiting.handle) rememberFile(waiting.handle).then(showRecent);
     status(`${model.store.pages.length} ページ ／ 書き込み ${model.store.annots.length} 件`);
-    if (!mine) setTimeout(() => offerDraft(data), 60);
+    setTimeout(async () => { await noticeRestrictions(data); if (!mine) offerDraft(data); }, 60);
   } catch (err) {
     waiting.settle.reject(err);
     if (state.preview === waiting) state.preview = null;
@@ -796,11 +826,15 @@ model.subscribe((reason) => {
   refreshPanels();
 });
 
+let zoomRibbonTimer;
 viewer.addEventListener('zoom', () => {
   state.editor?.setScale(viewer.scale);
   if (noteEditor) closeNoteEditor();
   refreshOverlays();
   syncZoomControls();
+  // "Fit width" / "Whole page" show as pressed only while they are in force.
+  clearTimeout(zoomRibbonTimer);
+  zoomRibbonTimer = setTimeout(() => ribbon.refresh(), 80);
 });
 viewer.addEventListener('page', (e) => {
   if (document.activeElement !== $('#pageInput')) $('#pageInput').value = String(e.detail.page + 1);
@@ -1607,6 +1641,59 @@ async function insertDate() {
   if (values) addTextBox(options[values.format]);
 }
 
+/**
+ * A QR code for a URL or a short text (a form, a slide deck, a contact page),
+ * drawn in the browser and placed like any picture. Made with a quiet zone
+ * and in black on white so phone cameras read it off paper and screens.
+ */
+async function insertQrCode() {
+  if (!hasDoc()) { toast('先にPDFを開いてください', 'warn'); return; }
+  const values = await formDialog({
+    title: 'QRコードを入れる',
+    intro: 'URL（申込フォーム・資料の置き場所など）や短い文をQRコードにして、ページに置きます。インターネットには接続しません。',
+    fields: [
+      { key: 'text', label: 'URL または文字', type: 'textarea', rows: 2, placeholder: 'https://…' },
+      { key: 'size', label: '大きさ', type: 'select', value: '25', options: { 15: '小（15mm）', 25: '中（25mm）', 35: '大（35mm）', 50: '特大（50mm）' } },
+    ],
+    validate: (v) => (v.text.trim() ? null : 'URL か文字を入力してください'),
+    confirmLabel: '入れる',
+  });
+  if (!values) return;
+  const text = values.text.trim();
+  let qr;
+  try {
+    const { default: qrcode } = await import('../vendor/qrcode-generator-1.4.4/qrcode.mjs');
+    qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+    qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+  } catch (err) {
+    toast(/overflow|length/i.test(String(err?.message || err))
+      ? '長すぎてQRコードにできません。短いURLにしてください'
+      : `QRコードを作れませんでした: ${err?.message || err}`, 'error');
+    return;
+  }
+  const count = qr.getModuleCount();
+  const quiet = 4;
+  const cell = Math.max(4, Math.ceil(480 / (count + quiet * 2)));
+  const side = (count + quiet * 2) * cell;
+  const canvas = document.createElement('canvas');
+  canvas.width = side;
+  canvas.height = side;
+  const ctx2d = canvas.getContext('2d');
+  ctx2d.fillStyle = '#ffffff';
+  ctx2d.fillRect(0, 0, side, side);
+  ctx2d.fillStyle = '#000000';
+  for (let row = 0; row < count; row += 1) {
+    for (let col = 0; col < count; col += 1) {
+      if (qr.isDark(row, col)) ctx2d.fillRect((col + quiet) * cell, (row + quiet) * cell, cell, cell);
+    }
+  }
+  const points = (Number(values.size) * 72) / 25.4;
+  await insertImage({ image: canvas.toDataURL('image/png'), width: side, height: side }, { points: [points, points] });
+  toast('QRコードを置きました。印刷する場合は、スマートフォンで読めるか一度確かめてください');
+}
+
 // ================================================================ arranging
 
 /** Line several selected things up, or space them evenly. */
@@ -2025,6 +2112,53 @@ function textSelectionActive() {
   return !!anchor?.closest('.text-layer');
 }
 
+const CJK = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+
+/**
+ * Text copied from a PDF has a line break wherever the line ended on paper.
+ * Join the lines back into running text: no space between Japanese
+ * characters, one space between words, and a word hyphenated across the
+ * break put back together.
+ */
+function joinLines(text) {
+  // Private-use characters are bullets drawn with symbol fonts (Wingdings and the like): noise once copied.
+  const lines = String(text).replace(/\r\n?/g, '\n').replace(/[-]/g, '')
+    .split('\n').map((line) => line.trim()).filter(Boolean);
+  let out = '';
+  for (const line of lines) {
+    if (!out) { out = line; continue; }
+    if (/[a-z]-$/.test(out) && /^[a-z]/.test(line)) { out = out.slice(0, -1) + line; continue; }
+    const glue = CJK.test(out.at(-1)) || CJK.test(line[0]) ? '' : ' ';
+    out += glue + line;
+  }
+  return out.replace(/[ \t]{2,}/g, ' ');
+}
+
+/** The selection as a quotation with where it came from. */
+function citation(selection) {
+  const text = joinLines(selection.toString());
+  const wrap = selection.anchorNode?.parentElement?.closest('.page-wrap');
+  const page = wrap ? Number(wrap.dataset.page) + 1 : viewer.currentPage + 1;
+  const title = (model.store.name || '').replace(/\.pdf$/i, '');
+  const japanese = CJK.test(text) || CJK.test(title);
+  return japanese ? `「${text}」（${title}、${page}ページ）` : `"${text}" (${title}, p. ${page})`;
+}
+
+function copyText(text, message) {
+  const fallback = () => {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.append(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    toast(ok ? message : 'コピーできませんでした', ok ? '' : 'error');
+  };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(() => toast(message)).catch(fallback);
+  else fallback();
+}
+
 /** Selected page text gets the markup tools right next to it. */
 function showTextSelectionBar() {
   if (tools.tool !== 'select' || !textSelectionActive() || tools._activePointers.size) { return; }
@@ -2062,6 +2196,17 @@ function showTextSelectionBar() {
     }, { text: true }),
     barButton('copy', 'コピー (Ctrl+C)', () => {
       navigator.clipboard?.writeText(document.getSelection().toString()).then(() => toast('コピーしました')).catch(() => document.execCommand('copy'));
+      hideSelectionBar();
+    }),
+    barButton('copyplain', '改行をつなげてコピー（PDFの行末の改行を取って、1つの文にする。レポートへの引用に）', () => {
+      copyText(joinLines(document.getSelection().toString()), '改行をつなげてコピーしました');
+      // Left selected, the next drag over the same words would move the text instead of selecting afresh.
+      document.getSelection().removeAllRanges();
+      hideSelectionBar();
+    }),
+    barButton('cite', '出典つきでコピー（「引用文」（文書名、ページ）の形で）', () => {
+      copyText(citation(document.getSelection()), '出典つきでコピーしました');
+      document.getSelection().removeAllRanges();
       hideSelectionBar();
     }),
     barButton('search', 'この語句を検索', () => {
@@ -2837,6 +2982,13 @@ viewer.setSpread(getPref('spread')); ribbon.refresh(); }, active: () => !!getPre
   toWord: { label: 'Word', icon: 'word', title: 'PDFをWord（.docx）にする', run: () => convert.pdfToOffice('docx') },
   toPpt: { label: 'PowerPoint', icon: 'powerpoint', short: 'Power\nPoint', title: 'PDFをPowerPoint（.pptx）にする', run: () => convert.pdfToOffice('pptx') },
   toExcel: { label: 'Excel', icon: 'excel', title: 'PDFをExcel（.xlsx）にする', run: () => convert.pdfToOffice('xlsx') },
+  grayscale: { label: '白黒にする', icon: 'grayscale', title: '文書を白黒（グレースケール）にする。カラー印刷の節約・白黒提出に', run: ops.grayscaleDocument, ...needsDoc },
+  blankpages: { label: '白紙ページを削除', icon: 'blankpages', title: '白紙のページ（スキャンの裏面など）を探して削除', run: ops.removeBlankPages, ...needsDoc },
+  duplex: { label: '両面スキャンを並べる', icon: 'duplex', title: '表面→裏面の順にスキャンしたPDFを、1・2・3…の順に並べ直す', run: ops.reorderDuplex, ...needsDoc },
+  replacepage: { label: '差し替え', icon: 'replacepage', title: 'ページを別のPDFのページと差し替える（修正版・署名済みのページなど）', run: ops.replacePages, ...needsDoc },
+  booklet: { label: '小冊子', icon: 'booklet', title: '中とじの小冊子に印刷できる並びで書き出す', run: ops.makeBooklet, ...needsDoc },
+  redactpii: { label: '個人情報を検出', icon: 'pii', title: '電話番号・メールアドレス・マイナンバーなどを探して墨消しを指定', run: ops.redactPersonalInfo, ...needsDoc },
+  qrcode: { label: 'QRコード', icon: 'qr', title: 'URL などをQRコードにして入れる', run: insertQrCode, ...needsDoc },
   extractimg: { label: '画像を取り出す', icon: 'extractimg', short: '画像を\n取り出す', title: 'PDFに入っている写真や図を、元の画質のまま取り出す', run: convert.extractImages, ...needsDoc },
   mergeNew: { label: 'PDFを結合', icon: 'merge', short: 'PDFを\n結合', title: '複数のPDFを順番に並べて1つにまとめる', run: () => convert.mergePdfs() },
   organize: { label: 'ページを整理', icon: 'organize', short: 'ページを\n整理', title: 'ページを一覧で見ながら、並べ替え・回転・削除・追加をまとめて行う', run: () => openOrganizer(), ...needsDoc },
@@ -2875,7 +3027,7 @@ const tabs = [
   { id: 'insert', label: '挿入', groups: [
     { label: 'テキスト', items: [{ big: 'freetext' }, { col: ['callout', 'note', 'date'] }, { col: ['snippet'] }] },
     { label: '図形', items: [{ col: ['line', 'arrow', 'polyline'] }, { col: ['square', 'circle', 'polygon'] }] },
-    { label: '画像・印', items: [{ big: 'image' }, { big: 'hanko' }, { big: 'signature' }, { col: ['stamp', 'mark', 'whiteout'] }] },
+    { label: '画像・印', items: [{ big: 'image' }, { big: 'hanko' }, { big: 'signature' }, { col: ['stamp', 'mark', 'whiteout'] }, { col: ['qrcode'] }] },
     { label: 'ページに入れる', items: [{ col: ['headerfooter', 'watermark', 'bates'] }, { col: ['removestamps'] }] },
     { label: 'フォント', items: [custom(fontGroup)] },
     { label: '書式', items: [custom(styleGroup)] },
@@ -2888,9 +3040,9 @@ const tabs = [
   ] },
   { id: 'pages', label: 'ページ', groups: [
     { label: '回転', items: [{ big: 'rotatecw' }, { col: ['rotateccw', 'rotateall'] }] },
-    { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }] },
+    { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }, { col: ['replacepage', 'blankpages', 'duplex'] }] },
     { label: '結合・分割', items: [{ big: 'merge' }, { col: ['extract', 'split'] }, { big: 'organize' }] },
-    { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'toimages', 'fitpaper'] }, { col: ['crop', 'uncrop', 'autocrop'] }] },
+    { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'booklet', 'grayscale'] }, { col: ['toimages', 'fitpaper'] }, { col: ['crop', 'uncrop', 'autocrop'] }] },
     { label: '対象', items: [custom(() => h('div', { class: 'rhint', text: hasDoc()
       ? `対象: ${describePages(targetPages())}。左のページ一覧で Ctrl / Shift を押しながら選ぶと、複数ページをまとめて操作できます。`
       : 'PDFを開くと、ページの回転・削除・並べ替え・結合ができます。' }),
@@ -2899,12 +3051,12 @@ const tabs = [
   { id: 'convert', label: '変換', groups: [
     { label: 'PDFにする', items: [{ big: 'fromWord' }, { big: 'fromPpt' }, { big: 'fromExcel' }, { big: 'fromImages' }] },
     { label: 'PDFから', items: [{ big: 'toWord' }, { big: 'toPpt' }, { big: 'toExcel' }, { big: 'toimages' }, { big: 'extractimg' }] },
-    { label: 'まとめる・整える', items: [{ big: 'mergeNew' }, { big: 'organize' }, { big: 'split' }, { big: 'compress' }] },
+    { label: 'まとめる・整える', items: [{ big: 'mergeNew' }, { big: 'organize' }, { big: 'split' }, { big: 'compress' }, { col: ['grayscale', 'booklet'] }] },
   ] },
   { id: 'review', label: '校閲', groups: [
     { label: 'コメント', items: [{ big: 'comments' }, { col: ['note', 'callout', 'annotexport'] }] },
     { label: 'マーカー', items: [{ col: ['highlight', 'underline', 'strikeout'] }, { col: ['squiggly', 'areaHighlight', 'markall'] }] },
-    { label: '墨消し（黒塗り）', items: [{ big: 'redact' }, { col: ['redactsearch', 'redactapply', 'scrub'] }] },
+    { label: '墨消し（黒塗り）', items: [{ big: 'redact' }, { col: ['redactsearch', 'redactpii', 'redactapply'] }, { col: ['scrub'] }] },
     { label: '比較', items: [{ col: ['compare'] }] },
     { label: '仕上げ', items: [{ col: ['flatten', 'clearall'] }] },
     { label: '書式', items: [custom(styleGroup)] },
@@ -2951,6 +3103,7 @@ function fileMenu(anchor) {
     { label: 'PDFに入っている画像を取り出す…', icon: 'extractimg', disabled: !open, action: convert.extractImages },
     { label: '文字だけを取り出す（テキストファイル）', icon: 'text2', disabled: !open, action: ops.exportText },
     { label: '配布資料にする（複数ページを1枚に）…', icon: 'nup', disabled: !open, action: ops.handout },
+    { label: '小冊子にする（中とじ印刷用）…', icon: 'booklet', disabled: !open, action: ops.makeBooklet },
     { label: 'パスワードを付けて書き出す…', icon: 'lock', disabled: !open, action: ops.protectDocument },
     { label: 'ファイルを軽くする…', icon: 'compress', disabled: !open, action: ops.compressDocument },
     '-',

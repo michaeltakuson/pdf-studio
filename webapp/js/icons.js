@@ -148,6 +148,16 @@ const P = {
   organize: '<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><path d="M13 16.500h7M16.500 13v7"/>',
   extractimg: '<rect x="3" y="4" width="13" height="11" rx="1.500"/><circle cx="7.500" cy="8" r="1.300"/><path d="m4 13 4-3.500 3 2.500 2.500-2L16 13"/><path d="M18 14v7M15 18l3 3 3-3"/>',
   topdf: '<path d="M5 3h9l5 5v13H5z"/><path d="M14 3v5h5M8 14h8M8 18h5"/><path d="M3 11h6M6.500 8.500 9 11l-2.500 2.500" stroke-width="1.700"/>',
+  // everyday extras
+  grayscale: '<circle cx="12" cy="12" r="8.500"/><path d="M12 3.500v17a8.500 8.500 0 0 0 0-17z" fill="currentColor" stroke="none"/>',
+  blankpages: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="m9.500 12.500 5 5M14.500 12.500l-5 5"/>',
+  duplex: '<path d="M4 5h7v10H4zM13 9h7v10h-7z"/><path d="M7.500 18.500c0 2 2 2.500 4 2.500M16.500 5.500c0-2-2-2.500-4-2.500"/><path d="m10 19.500 1.500 1.500-1.500 1.500M14 1.500 12.500 3 14 4.500"/>',
+  replacepage: '<path d="M3 4h7v10H3zM14 10h7v10h-7z"/><path d="M12 6h3a2 2 0 0 1 2 2v1M12 18H9a2 2 0 0 1-2-2v-1"/><path d="m15.500 7.500 1.500 1.500 1.500-1.500M8.500 16.500 7 15l-1.500 1.500"/>',
+  booklet: '<path d="M12 6c-2-1.500-5-2-8-1.500V19c3-.500 6 0 8 1.500 2-1.500 5-2 8-1.500V4.500c-3-.500-6 0-8 1.500z"/><path d="M12 6v14.500"/>',
+  qr: '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4z"/><path d="M6.500 6.500h1v1h-1zM16.500 6.500h1v1h-1zM6.500 16.500h1v1h-1z" fill="currentColor"/><path d="M14 14h2v2h-2zM18 14h2M14 18v2h2M18 18h2v2"/>',
+  pii: '<path d="M12 3 5 6v5c0 4.500 3 8 7 10 4-2 7-5.500 7-10V6z"/><circle cx="12" cy="10" r="2.300"/><path d="M8.500 16c.700-1.800 2-2.700 3.500-2.700s2.800.900 3.500 2.700"/>',
+  copyplain: '<path d="M9 9h10v12H9z"/><path d="M5 15V3h10"/><path d="M12 13h4M12 17h2"/>',
+  cite: '<path d="M8 7H5v5h3v1c0 1.500-1 2.500-2.500 3M17 7h-3v5h3v1c0 1.500-1 2.500-2.500 3"/>',
 };
 
 /** An icon as an SVG string. */

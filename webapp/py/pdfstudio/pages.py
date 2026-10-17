@@ -139,7 +139,7 @@ def auto_crop(doc: pymupdf.Document, pages: list[int] | None, padding: float = 1
 
 
 def add_margins(doc: pymupdf.Document, pages: list[int] | None, *, left=0.0, top=0.0,
-                right=0.0, bottom=0.0) -> int:
+                right=0.0, bottom=0.0, pattern: str = "none") -> int:
     """Grow the paper around the content: room to write notes beside a slide.
 
     Only the page boxes change, so the content, its links and every annotation
@@ -158,41 +158,161 @@ def add_margins(doc: pymupdf.Document, pages: list[int] | None, *, left=0.0, top
         # PDF space has y pointing up: "top" is the high y edge.
         grown = pymupdf.Rect(box.x0 - l, box.y0 - b, box.x1 + r, box.y1 + t)
         doc.xref_set_key(page.xref, "MediaBox", f"[{grown.x0:.2f} {grown.y0:.2f} {grown.x1:.2f} {grown.y1:.2f}]")
-        if crop != box:
+        # The visible area is the CropBox. PowerPoint and many other producers
+        # write one equal to the MediaBox, and left alone it would hide the new
+        # margin. A page someone trimmed keeps its trim, grown by the margin.
+        # (page.cropbox is in top-down coordinates; the raw box is bottom-up.)
+        if crop == box:
             doc.xref_set_key(page.xref, "CropBox", "null")
+        else:
+            raw = pymupdf.Rect(crop.x0, box.y1 - crop.y1 + box.y0, crop.x1, box.y1 - crop.y0 + box.y0)
+            raw = pymupdf.Rect(raw.x0 - l, raw.y0 - b, raw.x1 + r, raw.y1 + t)
+            doc.xref_set_key(page.xref, "CropBox", f"[{raw.x0:.2f} {raw.y0:.2f} {raw.x1:.2f} {raw.y1:.2f}]")
+        for key in ("TrimBox", "BleedBox", "ArtBox"):
+            if doc.xref_get_key(page.xref, key)[0] != "null":
+                doc.xref_set_key(page.xref, key, "null")
+        if pattern in ("lines", "grid", "dots"):
+            _rule_margins(doc[index], left, top, right, bottom, pattern)
         count += 1
     return count
 
 
-def nup(doc: pymupdf.Document, per_sheet: int = 2, *, border: bool = True) -> bytes:
-    """Several pages per sheet of A4 — handouts and exam-revision printouts."""
+def _rule_margins(page: pymupdf.Page, left: float, top: float, right: float, bottom: float, pattern: str) -> None:
+    """Draw note paper into the margins just added: ruled lines, a grid or dots.
+
+    The margins are given as the reader sees the page; drawing happens in the
+    unrotated page, so every point goes through the derotation matrix.
+    """
+    view = page.rect
+    regions = []
+    if left:
+        regions.append(pymupdf.Rect(0, 0, left, view.height))
+    if right:
+        regions.append(pymupdf.Rect(view.width - right, 0, view.width, view.height))
+    if top:
+        regions.append(pymupdf.Rect(left, 0, view.width - right, top))
+    if bottom:
+        regions.append(pymupdf.Rect(left, view.height - bottom, view.width - right, view.height))
+    mm = 72 / 25.4
+    inset = 4 * mm
+    step = (7 if pattern == "lines" else 5) * mm
+    turn = page.derotation_matrix
+    # Some producers (Google Docs, Skia) leave the graphics state of their
+    # content open; anything added afterwards would land upside down.
+    page.wrap_contents()
+    shape = page.new_shape()
+    colour = (0.65, 0.65, 0.65)
+    for region in regions:
+        area = pymupdf.Rect(region.x0 + inset, region.y0 + inset, region.x1 - inset, region.y1 - inset)
+        if area.width < step or area.height < step:
+            continue
+        if pattern == "dots":
+            y = area.y0
+            while y <= area.y1 + 0.1:
+                x = area.x0
+                while x <= area.x1 + 0.1:
+                    shape.draw_circle(pymupdf.Point(x, y) * turn, 0.6)
+                    x += step
+                y += step
+            shape.finish(color=None, fill=(0.6, 0.6, 0.6), width=0)
+            continue
+        y = area.y0
+        while y <= area.y1 + 0.1:
+            shape.draw_line(pymupdf.Point(area.x0, y) * turn, pymupdf.Point(area.x1, y) * turn)
+            y += step
+        if pattern == "grid":
+            x = area.x0
+            while x <= area.x1 + 0.1:
+                shape.draw_line(pymupdf.Point(x, area.y0) * turn, pymupdf.Point(x, area.y1) * turn)
+                x += step
+        shape.finish(color=colour, width=0.5)
+    shape.commit(overlay=True)
+
+
+NUP_GRIDS = {2: [(2, 1), (1, 2)], 4: [(2, 2)], 6: [(2, 3), (3, 2)], 8: [(4, 2), (2, 4)], 9: [(3, 3)]}
+
+
+def _best_grid(per_sheet: int, aspect: float, margin: float, gap: float):
+    """The sheet orientation and grid that show the pages biggest.
+
+    ``aspect`` is width / height of the pages. Landscape slides four to a
+    sheet fill a landscape A4 far better than a portrait one, and the reverse
+    for a paper; trying each candidate is simpler than a rule per case.
+    """
+    best = None
+    for cols, rows in NUP_GRIDS.get(per_sheet, NUP_GRIDS[2]):
+        for width, height in ((595, 842), (842, 595)):
+            cell_w = (width - 2 * margin - (cols - 1) * gap) / cols
+            cell_h = (height - 2 * margin - (rows - 1) * gap) / rows
+            scale = min(cell_w / aspect, cell_h)
+            if best is None or scale > best[0] + 0.5:
+                best = (scale, width, height, cols, rows)
+    return best[1:]
+
+
+def _placed(cell: pymupdf.Rect, src: pymupdf.Rect, align_left: bool = False) -> pymupdf.Rect:
+    scale = min(cell.width / src.width, cell.height / src.height)
+    w, h = src.width * scale, src.height * scale
+    x0 = cell.x0 if align_left else cell.x0 + (cell.width - w) / 2
+    y0 = cell.y0 + (cell.height - h) / 2
+    return pymupdf.Rect(x0, y0, x0 + w, y0 + h)
+
+
+def nup(doc: pymupdf.Document, per_sheet=2, *, border: bool = True, numbers: bool = False) -> bytes:
+    """Several pages per sheet of A4 — handouts and exam-revision printouts.
+
+    ``per_sheet`` is 2/4/6/8/9, or "notes3": three pages down the left of a
+    portrait sheet with ruled lines beside each for notes (the classic lecture
+    handout). The sheet turns to whichever way shows the pages largest.
+    """
     source = pymupdf.open("pdf", doc.tobytes())
     try:
         try:
             source.bake()  # markup is not carried by show_pdf_page, so burn it in
         except Exception:
             pass
-        layouts = {2: (842, 595, 2, 1), 4: (595, 842, 2, 2), 6: (595, 842, 2, 3),
-                   8: (842, 595, 4, 2), 9: (595, 842, 3, 3)}
-        width, height, cols, rows = layouts.get(int(per_sheet), layouts[2])
+        sizes = sorted(source[i].rect.width / max(1.0, source[i].rect.height) for i in range(source.page_count))
+        aspect = sizes[len(sizes) // 2] if sizes else 0.7
         margin, gap = 24, 10
+        notes = str(per_sheet) == "notes3"
+        if notes:
+            width, height, cols, rows = 595, 842, 1, 3
+            margin, gap = 32, 18
+        else:
+            width, height, cols, rows = _best_grid(int(per_sheet), aspect, margin, gap)
+        bottom = 14 if numbers else 0
         cell_w = (width - 2 * margin - (cols - 1) * gap) / cols
-        cell_h = (height - 2 * margin - (rows - 1) * gap) / rows
+        cell_h = (height - 2 * margin - bottom - (rows - 1) * gap) / rows
         out = pymupdf.open()
         sheet = None
+        per = cols * rows
         for index in range(source.page_count):
-            slot = index % (cols * rows)
+            slot = index % per
             if slot == 0:
                 sheet = out.new_page(width=width, height=height)
+                if numbers:
+                    number = index // per + 1
+                    total = (source.page_count + per - 1) // per
+                    label = f"{number} / {total}"
+                    sheet.insert_text((width / 2 - len(label) * 2.5, height - margin + 4), label,
+                                      fontsize=9, color=(0.35, 0.35, 0.35))
             col, row = slot % cols, slot // cols
             x = margin + col * (cell_w + gap)
             y = margin + row * (cell_h + gap)
             cell = pymupdf.Rect(x, y, x + cell_w, y + cell_h)
             src = source[index].rect
-            scale = min(cell.width / src.width, cell.height / src.height)
-            w, h = src.width * scale, src.height * scale
-            placed = pymupdf.Rect(cell.x0 + (cell.width - w) / 2, cell.y0 + (cell.height - h) / 2,
-                                  cell.x0 + (cell.width + w) / 2, cell.y0 + (cell.height + h) / 2)
+            if notes:
+                slide_cell = pymupdf.Rect(cell.x0, cell.y0, cell.x0 + cell.width * 0.54, cell.y1)
+                placed = _placed(slide_cell, src, align_left=True)
+                # Ruled lines for notes, level with the slide, 7 mm apart.
+                left, right = placed.x1 + 16, cell.x1
+                step = 7 * 72 / 25.4
+                line_y = placed.y0 + step
+                while line_y <= placed.y1 + 0.5:
+                    sheet.draw_line((left, line_y), (right, line_y), color=(0.72, 0.72, 0.72), width=0.5)
+                    line_y += step
+            else:
+                placed = _placed(cell, src)
             sheet.show_pdf_page(placed, source, index)
             if border:
                 sheet.draw_rect(placed, color=(0.6, 0.6, 0.6), width=0.5)
@@ -311,11 +431,10 @@ def compress(doc: pymupdf.Document, *, dpi: int = 150, quality: int = 75) -> dic
         images = True
     except Exception:
         pass
-    try:
-        doc.subset_fonts()
-    except Exception:
-        pass
-    after = len(doc.tobytes(garbage=4, deflate=True))
+    from . import content
+
+    content.subset(doc)
+    after = len(content.finish_fonts(doc.tobytes(garbage=4, deflate=True)))
     return {"before": before, "after": after, "saved": max(0, before - after), "images": images}
 
 
@@ -588,24 +707,42 @@ def watermark(doc: pymupdf.Document, text: str, *, pages=None, colour="#c0c0c0",
 
 
 def header_footer(doc: pymupdf.Document, *, header="", footer="", pages=None,
-                  size=9, colour="#555555", margin=28) -> int:
-    """Place running text, substituting {page} and {pages}."""
+                  size=9, colour="#555555", margin=28, align="center", start=1, skip=0) -> int:
+    """Place running text, substituting {page} and {pages}.
+
+    ``skip`` leaves the first pages (a cover, a contents page) unnumbered;
+    ``start`` is the number the first numbered page gets. ``align`` is
+    center / left / right, or "outside" (right on odd pages, left on even,
+    for printing on both sides).
+    """
     font = _font()
-    targets = _target_pages(doc, pages)
+    skip = max(0, int(skip))
+    start = int(start)
+    targets = [i for i in _target_pages(doc, pages) if i >= skip]
+    last = doc.page_count - skip + start - 1
+    side = margin + 8
     for index in targets:
         page = doc[index]
         _isolate(page)
         before = set(page.get_contents())
         rect = page.rect
         writer = pymupdf.TextWriter(rect)
+        number = index - skip + start
+        where = align
+        if align == "outside":
+            where = "right" if number % 2 else "left"
         for text, y in ((header, margin), (footer, rect.height - margin + size)):
             if not text:
                 continue
-            filled = text.replace("{page}", str(index + 1)).replace("{pages}", str(doc.page_count))
+            filled = text.replace("{page}", str(number)).replace("{pages}", str(last))
             width = font.text_length(filled, size)
-            writer.append(
-                pymupdf.Point((rect.width - width) / 2, y), filled, font=font, fontsize=size
-            )
+            if where == "left":
+                x = side
+            elif where == "right":
+                x = rect.width - side - width
+            else:
+                x = (rect.width - width) / 2
+            writer.append(pymupdf.Point(x, y), filled, font=font, fontsize=size)
         writer.write_text(page, color=hex_to_rgb(colour))
         _tag_new_streams(page, before, "headerFooter")
     _subset(doc)
@@ -741,8 +878,12 @@ def save_options(*, user_password="", owner_password="", permissions=None) -> di
 
 def optimise(doc: pymupdf.Document, *, subset=True) -> dict:
     """Report what optimisation can reclaim; the caller saves with these flags."""
+    from . import content
+
     before = len(doc.tobytes())
+    data = doc.tobytes(garbage=4, deflate=True, clean=True)
     if subset:
-        doc.subset_fonts()
-    after = len(doc.tobytes(garbage=4, deflate=True, clean=True))
+        content.subset(doc)
+        data = content.finish_fonts(data)
+    after = len(data)
     return {"before": before, "after": after, "saved": max(0, before - after)}

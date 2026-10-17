@@ -116,6 +116,12 @@ export class Viewer extends EventTarget {
       const page = await this.pdf.getPage(i + 1);
       this.pageViews.push(this._createPageView(page, i));
     }
+    // A newly opened document picks its fit: slides (landscape pages) are read
+    // one whole slide at a time, papers and forms at a readable width.
+    if (!anchor && this.zoomMode.startsWith('fit') && this.pageViews.length) {
+      const first = this.pageViews[0];
+      this.zoomMode = first.width > first.height * 1.05 ? 'fit-page' : 'fit-width';
+    }
     // Lay the pages out before watching them. Until they have a height they all
     // sit at the same point, so every page would count as on-screen and a long
     // document would render every page at once.
