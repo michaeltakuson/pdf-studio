@@ -273,6 +273,15 @@ def page_action(payload: dict) -> dict:
                 right=float(payload.get("right", 0)), bottom=float(payload.get("bottom", 0)),
                 pattern=str(payload.get("pattern") or "none"),
             )
+        elif action == "split-spreads":
+            if not extras.split_spreads(entry.doc, targets or None, right_to_left=bool(payload.get("rightToLeft"))):
+                raise ApiError(400, "横長（見開き）のページがありません")
+        elif action == "note-page":
+            extras.insert_note_page(
+                entry.doc, int(payload.get("at", entry.doc.page_count)),
+                float(payload.get("width", 595)), float(payload.get("height", 842)),
+                str(payload.get("pattern") or "lines"),
+            )
         elif action == "reorder":
             order = [int(p) for p in payload.get("order") or []]
             if sorted(order) != list(range(entry.doc.page_count)):
@@ -281,6 +290,9 @@ def page_action(payload: dict) -> dict:
         else:
             raise ApiError(404, f"未対応のページ操作: {action}")
     except ApiError:
+        # Refused before anything changed: the snapshot would be an undo step that does nothing.
+        if entry.snapshots and entry.snapshots[0][0] == f"before-{action}":
+            entry.snapshots.pop(0)
         raise
     except Exception as exc:
         raise ApiError(400, str(exc))

@@ -222,6 +222,35 @@ def test_stamps_in_sequence_keep_their_glyphs():
         textap._font_bytes = saved
 
 
+def test_split_spreads_and_note_pages():
+    doc = pymupdf.open()
+    page = doc.new_page(width=842, height=595)
+    page.insert_text((100, 100), "LEFT", fontsize=30)
+    page.insert_text((520, 100), "RIGHT", fontsize=30)
+    doc.new_page().insert_text((100, 100), "PORTRAIT", fontsize=30)
+    opened = call("open", {"name": "book.pdf", "data": doc.tobytes()})
+    i = opened["id"]
+    out = call("pages.action", {"docId": i, "action": "split-spreads", "pages": []})
+    assert len(out["pages"]) == 3
+    entry = bridge.session.get(i)
+    # get_text keeps to the visible area (the crop), as a reader sees each half.
+    words = [entry.doc[n].get_text().split() for n in range(3)]
+    assert "LEFT" in words[0] and "RIGHT" not in words[0], words
+    assert "RIGHT" in words[1] and "LEFT" not in words[1], words
+    # Nothing landscape left: refused, and no empty undo step is left behind.
+    depth = len(entry.snapshots)
+    refused = bridge.dispatch("pages.action", {"docId": i, "action": "split-spreads", "pages": [2]})
+    assert refused["status"] == 400 and len(entry.snapshots) == depth
+    # Duplicating the last page used to fail ("bad page number").
+    out = call("pages.action", {"docId": i, "action": "duplicate", "pages": [2]})
+    assert len(out["pages"]) == 4
+    out = call("pages.action", {"docId": i, "action": "note-page", "at": 4, "width": 595, "height": 842, "pattern": "grid"})
+    assert len(out["pages"]) == 5
+    pix = entry.doc[4].get_pixmap(dpi=72)
+    assert min(pix.samples) < 220, "grid lines on the note page"
+    call("close", {"docId": i})
+
+
 def test_restrictions_reported():
     doc = pymupdf.open()
     doc.new_page().insert_text((50, 50), "locked", fontsize=12)
@@ -242,5 +271,6 @@ if __name__ == "__main__":
     test_bridge_routes()
     test_replace_pages()
     test_stamps_in_sequence_keep_their_glyphs()
+    test_split_spreads_and_note_pages()
     test_restrictions_reported()
     print("extras tests passed")

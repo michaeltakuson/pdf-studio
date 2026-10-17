@@ -3003,6 +3003,8 @@ viewer.setSpread(getPref('spread')); ribbon.refresh(); }, active: () => !!getPre
   blankpages: { label: '白紙ページを削除', icon: 'blankpages', title: '白紙のページ（スキャンの裏面など）を探して削除', run: ops.removeBlankPages, ...needsDoc },
   duplex: { label: '両面スキャンを並べる', icon: 'duplex', title: '表面→裏面の順にスキャンしたPDFを、1・2・3…の順に並べ直す', run: ops.reorderDuplex, ...needsDoc },
   replacepage: { label: '差し替え', icon: 'replacepage', title: 'ページを別のPDFのページと差し替える（修正版・署名済みのページなど）', run: ops.replacePages, ...needsDoc },
+  splitspreads: { label: '見開きを分割', icon: 'splitspread', title: '見開きでスキャンした横長のページを、左右1ページずつに分ける', run: ops.splitSpreads, ...needsDoc },
+  notepage: { label: 'ノートを挿入', icon: 'notepage', title: '罫線・方眼・ドットのページを今のページのあとに入れる', run: ops.insertNotePage, ...needsDoc },
   booklet: { label: '小冊子', icon: 'booklet', title: '中とじの小冊子に印刷できる並びで書き出す', run: ops.makeBooklet, ...needsDoc },
   redactpii: { label: '個人情報を検出', icon: 'pii', title: '電話番号・メールアドレス・マイナンバーなどを探して墨消しを指定', run: ops.redactPersonalInfo, ...needsDoc },
   qrcode: { label: 'QRコード', icon: 'qr', title: 'URL などをQRコードにして入れる', run: insertQrCode, ...needsDoc },
@@ -3057,7 +3059,7 @@ const tabs = [
   ] },
   { id: 'pages', label: 'ページ', groups: [
     { label: '回転', items: [{ big: 'rotatecw' }, { col: ['rotateccw', 'rotateall'] }] },
-    { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }, { col: ['replacepage', 'blankpages', 'duplex'] }] },
+    { label: '整理', items: [{ col: ['pagedelete', 'pagecopy', 'pageblank'] }, { col: ['moveup', 'movedown', 'thumbs'] }, { col: ['replacepage', 'blankpages', 'duplex'] }, { col: ['splitspreads', 'notepage'] }] },
     { label: '結合・分割', items: [{ big: 'merge' }, { col: ['extract', 'split'] }, { big: 'organize' }] },
     { label: 'ノート・印刷用', items: [{ big: 'margins' }, { col: ['handout', 'booklet', 'grayscale'] }, { col: ['toimages', 'fitpaper'] }, { col: ['crop', 'uncrop', 'autocrop'] }] },
     { label: '対象', items: [custom(() => h('div', { class: 'rhint', text: hasDoc()

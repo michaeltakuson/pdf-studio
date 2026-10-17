@@ -317,3 +317,43 @@ def replace_pages(doc: pymupdf.Document, targets: list[int], source: pymupdf.Doc
         doc.insert_pdf(source, from_page=first + offset, to_page=first + offset, start_at=target)
         doc.delete_page(target + 1)
     return len(targets)
+
+
+# ------------------------------------------------------------------ spreads and note pages
+
+
+def split_spreads(doc: pymupdf.Document, targets: list[int] | None = None, *, right_to_left: bool = False) -> int:
+    """Cut each two-page spread (a book scanned open) into its left and right pages.
+
+    The page is copied and each copy shows one half (a crop, so the text stays
+    searchable and nothing is thrown away). Only landscape pages are split;
+    a portrait page in the same scan is a single page already. Right to left
+    is for books bound on the right — vertical Japanese text, manga.
+    """
+    from . import pages
+
+    chosen = sorted({int(t) for t in (targets or range(doc.page_count)) if 0 <= int(t) < doc.page_count})
+    count = 0
+    for index in reversed(chosen):
+        rect = doc[index].rect
+        if rect.width <= rect.height * 1.05:
+            continue
+        half = rect.width / 2
+        left = [0, 0, half, rect.height]
+        right = [half, 0, rect.width, rect.height]
+        first, second = (right, left) if right_to_left else (left, right)
+        pages.copy_page_after(doc, index)
+        pages.crop(doc, [index], first)
+        pages.crop(doc, [index + 1], second)
+        count += 1
+    return count
+
+
+def insert_note_page(doc: pymupdf.Document, at: int, width: float, height: float, pattern: str = "lines") -> None:
+    """A blank page of note paper: ruled lines, a grid or dots, with a writing margin."""
+    from . import pages
+
+    at = max(0, min(int(at), doc.page_count))
+    page = doc.new_page(pno=at, width=width, height=height)
+    if pattern in ("lines", "grid", "dots"):
+        pages.rule_regions(page, [pymupdf.Rect(0, 0, width, height)], pattern, inset_mm=12)

@@ -156,6 +156,8 @@ const P = {
   booklet: '<path d="M12 6c-2-1.500-5-2-8-1.500V19c3-.500 6 0 8 1.500 2-1.500 5-2 8-1.500V4.500c-3-.500-6 0-8 1.500z"/><path d="M12 6v14.500"/>',
   qr: '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4z"/><path d="M6.500 6.500h1v1h-1zM16.500 6.500h1v1h-1zM6.500 16.500h1v1h-1z" fill="currentColor"/><path d="M14 14h2v2h-2zM18 14h2M14 18v2h2M18 18h2v2"/>',
   pii: '<path d="M12 3 5 6v5c0 4.500 3 8 7 10 4-2 7-5.500 7-10V6z"/><circle cx="12" cy="10" r="2.300"/><path d="M8.500 16c.700-1.800 2-2.700 3.500-2.700s2.800.900 3.500 2.700"/>',
+  splitspread: '<path d="M3 5h18v14H3z"/><path d="M12 3v18" stroke-dasharray="2 2"/><path d="m7 12-2 0M17 12h2"/>',
+  notepage: '<path d="M6 3h12v18H6z"/><path d="M9 8h6M9 11h6M9 14h6M9 17h4"/>',
   copyplain: '<path d="M9 9h10v12H9z"/><path d="M5 15V3h10"/><path d="M12 13h4M12 17h2"/>',
   cite: '<path d="M8 7H5v5h3v1c0 1.500-1 2.500-2.500 3M17 7h-3v5h3v1c0 1.500-1 2.500-2.500 3"/>',
 };

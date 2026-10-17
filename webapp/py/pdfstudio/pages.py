@@ -44,9 +44,18 @@ def delete(doc: pymupdf.Document, pages: list[int]) -> None:
     doc.delete_pages(sorted(set(pages), reverse=True))
 
 
+def copy_page_after(doc: pymupdf.Document, index: int) -> None:
+    """Put a full copy of a page right after it.
+
+    MuPDF takes "insert before page n"; after the last page there is no page n,
+    and asking for it fails ("bad page number"), so the end is spelled -1.
+    """
+    doc.fullcopy_page(index, index + 1 if index + 1 < doc.page_count else -1)
+
+
 def duplicate(doc: pymupdf.Document, pages: list[int]) -> None:
     for index in sorted(set(pages), reverse=True):
-        doc.fullcopy_page(index, index + 1)
+        copy_page_after(doc, index)
 
 
 def move(doc: pymupdf.Document, source: int, target: int) -> None:
@@ -193,8 +202,13 @@ def _rule_margins(page: pymupdf.Page, left: float, top: float, right: float, bot
         regions.append(pymupdf.Rect(left, 0, view.width - right, top))
     if bottom:
         regions.append(pymupdf.Rect(left, view.height - bottom, view.width - right, view.height))
+    rule_regions(page, regions, pattern)
+
+
+def rule_regions(page: pymupdf.Page, regions: list, pattern: str, inset_mm: float = 4) -> None:
+    """Ruled lines (7 mm), a grid or dots (5 mm) inside each region, given as the reader sees the page."""
     mm = 72 / 25.4
-    inset = 4 * mm
+    inset = inset_mm * mm
     step = (7 if pattern == "lines" else 5) * mm
     turn = page.derotation_matrix
     # Some producers (Google Docs, Skia) leave the graphics state of their

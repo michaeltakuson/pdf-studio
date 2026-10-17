@@ -1019,3 +1019,52 @@ export async function redactPersonalInfo() {
   const result = await structural('/pii-mark', { items: chosen.picked, overlay: chosen.overlay }, { label: '墨消しの指定' });
   if (result) toast(`${result.marked} 箇所に墨消しを指定しました。「墨消しを適用」で実際に削除されます`);
 }
+
+export async function splitSpreads() {
+  const pages = model.store.pages;
+  const wide = pages.filter((p) => p.width > p.height * 1.05).length;
+  if (!wide) { toast('横長（見開き）のページがありません。見開きでスキャンした本やノートのPDFで使えます', 'warn'); return; }
+  const picked = state.pageSelection.size > 0;
+  const values = await formDialog({
+    title: '見開きを1ページずつに分ける',
+    intro: '本やノートを見開きでスキャンしたPDFの、横長のページを左右2ページに分けます。縦長のページはそのままです。'
+      + '分けたページも文字の検索・選択ができます。',
+    fields: [
+      { key: 'order', label: '読む順番', type: 'select', value: 'ltr', options: {
+        ltr: '左のページが先（横書きの本・ノート）', rtl: '右のページが先（縦書きの本・マンガ）',
+      } },
+      { key: 'scope', label: '対象', type: 'select', value: picked ? 'picked' : 'all', options: {
+        all: `横長のページすべて（${wide}）`, picked: `${describePages(targetPages())}だけ`,
+      } },
+    ],
+    warning: UNDO_NOTE,
+    confirmLabel: '分ける',
+  });
+  if (!values) return;
+  const result = await structural('/pages/split-spreads', {
+    pages: values.scope === 'all' ? [] : targetPages(), rightToLeft: values.order === 'rtl',
+  }, { label: '見開きの分割' });
+  if (result) { state.pageSelection.clear(); hooks.refreshAll(); toast(`${result.pages.length - pages.length} 枚の見開きを左右に分けました（Ctrl+Z で戻せます）`); }
+}
+
+export async function insertNotePage() {
+  const current = model.store.pages[viewer.currentPage] || { width: 595, height: 842 };
+  const values = await formDialog({
+    title: 'ノートのページを挿入',
+    intro: '今のページのあとに、罫線・方眼・ドットのページを入れます。スライドの間に書き込みのページを作るときに。',
+    fields: [
+      { key: 'pattern', label: '柄', type: 'select', value: 'lines', options: {
+        lines: '罫線（7mm）', grid: '方眼（5mm）', dots: 'ドット（5mm）', none: '白紙',
+      } },
+      { key: 'size', label: '大きさ', type: 'select', value: 'same', options: {
+        same: '今のページと同じ', a4: 'A4 縦', a4l: 'A4 横',
+      } },
+    ],
+    confirmLabel: '挿入する',
+  });
+  if (!values) return;
+  const [width, height] = { same: [current.width, current.height], a4: [595.28, 841.89], a4l: [841.89, 595.28] }[values.size];
+  const at = Math.max(...targetPages()) + 1;
+  const result = await structural('/pages/note-page', { at, width, height, pattern: values.pattern }, { label: 'ページの挿入' });
+  if (result) { viewer.scrollToPage(at); toast(`${at + 1} ページ目にノートのページを入れました（Ctrl+Z で戻せます）`); }
+}
