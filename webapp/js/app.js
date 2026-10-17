@@ -684,11 +684,7 @@ function refreshPanels() {
   saveState.classList.toggle('dirty', state.unsaved);
   document.title = hasDoc() ? `${state.unsaved ? '● ' : ''}${name} — PDF Studio` : 'PDF Studio';
 
-  if (hasDoc()) {
-    const selected = selection.length ? ` ／ ${selection.length} 件を選択中` : '';
-    const pages = state.pageSelection.size > 1 ? ` ／ ${state.pageSelection.size} ページを選択中` : '';
-    status(`${model.store.pages.length} ページ ／ 書き込み ${model.store.annots.length} 件${selected}${pages}`);
-  }
+  updateStatusLine();
   // Counted from what is on screen, so it is right while a document is being
   // previewed before the engine has taken it over.
   const shown = viewer.pageViews.length;
@@ -2112,6 +2108,26 @@ function textSelectionActive() {
   return !!anchor?.closest('.text-layer');
 }
 
+/** Characters in the selected page text, for a word limit (spaces and line breaks not counted). */
+let selectedChars = 0;
+
+function updateStatusLine() {
+  if (!hasDoc()) return;
+  const selection = model.store.selection;
+  const selected = selection.length ? ` ／ ${selection.length} 件を選択中` : '';
+  const pages = state.pageSelection.size > 1 ? ` ／ ${state.pageSelection.size} ページを選択中` : '';
+  const chars = selectedChars ? ` ／ 選んだ文字 ${selectedChars.toLocaleString()} 字（空白を除く）` : '';
+  status(`${model.store.pages.length} ページ ／ 書き込み ${model.store.annots.length} 件${selected}${pages}${chars}`);
+}
+
+function countSelectedChars() {
+  const count = textSelectionActive()
+    ? [...joinLines(document.getSelection().toString()).replace(/\s/g, '')].length : 0;
+  if (count === selectedChars) return;
+  selectedChars = count;
+  updateStatusLine();
+}
+
 const CJK = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff\uff00-\uffef]/;
 
 /**
@@ -2222,6 +2238,7 @@ function showTextSelectionBar() {
 }
 
 document.addEventListener('selectionchange', () => {
+  countSelectedChars();
   if (tools.tool !== 'select') return;
   if (!textSelectionActive()) { if (!selectedAnnots().length) hideSelectionBar(); return; }
   scheduleBar();

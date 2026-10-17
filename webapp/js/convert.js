@@ -492,10 +492,14 @@ export function parseRanges(text, count) {
 }
 
 async function pagesWithoutText() {
+  // Reading every page takes a few seconds on a long document; without this
+  // the button looks as if it did nothing.
+  const done = busy('ページを調べています…');
   try {
+    await paint();
     const stats = await (await fetch(docUrl('/stats'))).json();
     return stats.pagesWithoutText || 0;
-  } catch { return 0; }
+  } catch { return 0; } finally { done(); }
 }
 
 /** PDF → Word (docx), PowerPoint (pptx) or Excel (xlsx). With no document open, asks for a PDF first. */
