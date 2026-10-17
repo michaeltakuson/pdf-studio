@@ -622,6 +622,7 @@ body[data-theme="dark"] .tab.file { color: #10203a; }
 .pii-kind { flex: 0 0 10em; font-size: 12px; }
 .pii-text { flex: 1; font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
 .pii-list .input { margin-top: 8px; }
+@media (max-width: 480px) { .pii-row { gap: 6px; } .pii-page { flex-basis: 3.6em; } .pii-kind { flex-basis: 6.5em; } }
 .dialog .warn-box { background: var(--surface-2); border-left: 3px solid #e8a33d; padding: 9px 12px; border-radius: 5px; margin-bottom: 14px; color: var(--text); white-space: pre-wrap; }
 .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
 
